@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::io::{self, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 mod board;
@@ -62,35 +65,46 @@ fn pst_val(p: usize, sq: usize) -> i32 {
     PST_W[p][sq]
 }
 
+#[derive(Clone)]
 struct TTEntry {
     depth: i32,
     score: i32,
     flag: u8,
     best: Option<Move>,
 }
+
 struct Searcher {
-    tt: HashMap<u64, TTEntry>,
-    nodes: u64,
-    start: Instant,
-    time_limit: Duration,
+    tt: Arc<Mutex<HashMap<u64, TTEntry>>>,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl Searcher {
     fn new() -> Self {
         Self {
-            tt: HashMap::new(),
-            nodes: 0,
-            start: Instant::now(),
-            time_limit: Duration::from_secs(3600),
+            tt: Arc::new(Mutex::new(HashMap::new())),
+            stop: Arc::new(AtomicBool::new(false)),
+            handle: None,
         }
     }
-    fn search(&mut self, b: &mut Board, depth: i32, time_ms: u64) -> (i32, Option<Move>) {
-        self.start = Instant::now();
-        self.time_limit = Duration::from_millis(time_ms);
+}
+
+struct SearchInstance {
+    searcher: Searcher,
+    nodes: u64,
+    start: Instant,
+    time_limit: Duration,
+}
+
+impl SearchInstance {
+    fn search(&mut self, b: &mut Board, depth: i32) -> (i32, Option<Move>) {
         let mut best = None;
         let mut score = 0;
         for d in 1..=depth {
             let (sc, bm) = self.alpha_beta(b, d, -30000, 30000);
+            if self.searcher.stop.load(Ordering::Relaxed) {
+                break;
+            }
             score = sc;
             if bm.is_some() {
                 best = bm;
@@ -104,11 +118,13 @@ impl Searcher {
     fn timed_out(&self) -> bool {
         self.start.elapsed() >= self.time_limit
     }
-    fn probe(&self, key: u64) -> Option<&TTEntry> {
-        self.tt.get(&key)
+    fn probe(&self, key: u64) -> Option<TTEntry> {
+        let tt = self.searcher.tt.lock().unwrap();
+        tt.get(&key).cloned()
     }
     fn store(&mut self, key: u64, e: TTEntry) {
-        self.tt.insert(key, e);
+        let mut tt = self.searcher.tt.lock().unwrap();
+        tt.insert(key, e);
     }
     fn alpha_beta(
         &mut self,
@@ -117,7 +133,8 @@ impl Searcher {
         mut alpha: i32,
         beta: i32,
     ) -> (i32, Option<Move>) {
-        if self.timed_out() {
+        if self.timed_out() || self.searcher.stop.load(Ordering::Relaxed) {
+            self.searcher.stop.store(true, Ordering::Relaxed);
             return (0, None);
         }
         self.nodes += 1;
@@ -169,6 +186,10 @@ impl Searcher {
         let mut flag = 2;
         for m in moves {
             b.make_move(m);
+            if b.in_check(b.stm.flip()) {
+                b.unmake();
+                continue;
+            }
             let (sc, _) = self.alpha_beta(b, depth - 1, -beta, -alpha);
             let sc = -sc;
             b.unmake();
@@ -194,6 +215,10 @@ impl Searcher {
         (alpha, best)
     }
     fn qsearch(&mut self, b: &mut Board, mut alpha: i32, beta: i32) -> i32 {
+        if self.timed_out() || self.searcher.stop.load(Ordering::Relaxed) {
+            self.searcher.stop.store(true, Ordering::Relaxed);
+            return 0;
+        }
         let stand = eval(b);
         if stand >= beta {
             return beta;
@@ -251,8 +276,18 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
     }
     if line == "ucinewgame" {
         *b = Board::startpos();
-        s.tt.clear();
+        s.tt.lock().unwrap().clear();
         println!("readyok");
+        return;
+    }
+    if line == "stop" {
+        s.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = s.handle.take() {
+            h.join().unwrap();
+        }
+        return;
+    }
+    if line.starts_with("setoption") {
         return;
     }
     if line.starts_with("position ") {
@@ -260,14 +295,32 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         return;
     }
     if line.starts_with("go") {
-        let depth = parse_depth(line).unwrap_or(6);
-        let (score, mv) = s.search(b, depth, 5000);
-        if let Some(m) = mv {
-            println!("info depth {} score cp {} nodes {}", depth, score, s.nodes);
-            println!("bestmove {}", move_to_str(m));
-        } else {
-            println!("bestmove 0000");
-        }
+        let params = parse_go(line);
+        let depth = params.depth.unwrap_or(100);
+        let time_ms = time_for_move(b.stm, &params);
+        let mut b2 = b.clone();
+        let tt = s.tt.clone();
+        let stop = s.stop.clone();
+        s.handle = Some(std::thread::spawn(move || {
+            stop.store(false, Ordering::Relaxed);
+            let mut si = SearchInstance {
+                searcher: Searcher {
+                    tt,
+                    stop,
+                    handle: None,
+                },
+                nodes: 0,
+                start: Instant::now(),
+                time_limit: Duration::from_millis(time_ms),
+            };
+            let (score, mv) = si.search(&mut b2, depth);
+            if let Some(m) = mv {
+                println!("info depth {} score cp {} nodes {}", depth, score, si.nodes);
+                println!("bestmove {}", move_to_str(m));
+            } else {
+                println!("bestmove 0000");
+            }
+        }));
         return;
     }
     if line.starts_with("perft ") {
@@ -276,8 +329,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
             .nth(1)
             .and_then(|x| x.parse::<u32>().ok())
             .unwrap_or(3);
-        let n = perft(b, d);
-        println!("nodes {}", n);
+        perft::test(b, d);
         return;
     }
 
@@ -292,7 +344,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
     }
     if line == "new" {
         *b = Board::startpos();
-        s.tt.clear();
+        s.tt.lock().unwrap().clear();
         return;
     }
     if line.starts_with("setboard ") {
@@ -301,10 +353,26 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
     }
     if line.starts_with("go") || line == "go" {
         let depth = 6;
-        let (_score, mv) = s.search(b, depth, 5000);
-        if let Some(m) = mv {
-            println!("move {}", move_to_str(m));
-        }
+        let mut b2 = b.clone();
+        let tt = s.tt.clone();
+        let stop = s.stop.clone();
+        s.handle = Some(std::thread::spawn(move || {
+            stop.store(false, Ordering::Relaxed);
+            let mut si = SearchInstance {
+                searcher: Searcher {
+                    tt,
+                    stop,
+                    handle: None,
+                },
+                nodes: 0,
+                start: Instant::now(),
+                time_limit: Duration::from_millis(5000),
+            };
+            let (_score, mv) = si.search(&mut b2, depth);
+            if let Some(m) = mv {
+                println!("move {}", move_to_str(m));
+            }
+        }));
         return;
     }
     if line.starts_with("move ") {
@@ -313,10 +381,26 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
     }
     if line.starts_with("hint") {
         let depth = 4;
-        let (_score, mv) = s.search(b, depth, 2000);
-        if let Some(m) = mv {
-            println!("Hint: {}", move_to_str(m));
-        }
+        let mut b2 = b.clone();
+        let tt = s.tt.clone();
+        let stop = s.stop.clone();
+        s.handle = Some(std::thread::spawn(move || {
+            stop.store(false, Ordering::Relaxed);
+            let mut si = SearchInstance {
+                searcher: Searcher {
+                    tt,
+                    stop,
+                    handle: None,
+                },
+                nodes: 0,
+                start: Instant::now(),
+                time_limit: Duration::from_millis(2000),
+            };
+            let (_score, mv) = si.search(&mut b2, depth);
+            if let Some(m) = mv {
+                println!("Hint: {}", move_to_str(m));
+            }
+        }));
         return;
     }
     if line == "force" {
@@ -355,6 +439,22 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
     }
 }
 
+fn time_for_move(stm: Side, params: &GoParams) -> u64 {
+    if let Some(mt) = params.movetime {
+        return mt;
+    }
+    let time = if stm == Side::White {
+        params.wtime
+    } else {
+        params.btime
+    };
+    if let Some(t) = time {
+        t / 20
+    } else {
+        5000
+    }
+}
+
 fn xboard_set_position(cmd: &str, b: &mut Board) {
     let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
     if parts.len() == 2 {
@@ -369,15 +469,28 @@ fn xboard_make_move(cmd: &str, b: &mut Board) {
     }
 }
 
-fn parse_depth(s: &str) -> Option<i32> {
+#[derive(Default)]
+struct GoParams {
+    wtime: Option<u64>,
+    btime: Option<u64>,
+    movetime: Option<u64>,
+    depth: Option<i32>,
+}
+
+fn parse_go(s: &str) -> GoParams {
+    let mut params = GoParams::default();
     let mut it = s.split_whitespace();
     it.next();
     while let Some(tok) = it.next() {
-        if tok == "depth" {
-            return it.next().and_then(|x| x.parse().ok());
+        match tok {
+            "wtime" => params.wtime = it.next().and_then(|x| x.parse().ok()),
+            "btime" => params.btime = it.next().and_then(|x| x.parse().ok()),
+            "movetime" => params.movetime = it.next().and_then(|x| x.parse().ok()),
+            "depth" => params.depth = it.next().and_then(|x| x.parse().ok()),
+            _ => {}
         }
     }
-    None
+    params
 }
 
 fn set_position(cmd: &str, b: &mut Board) {
@@ -405,46 +518,3 @@ fn set_position(cmd: &str, b: &mut Board) {
     }
 }
 
-fn move_to_str(m: Move) -> String {
-    let mut s = format!("{}{}", sq_to_str(m.from as usize), sq_to_str(m.to as usize));
-    if m.promo != 255 {
-        s.push(match m.promo {
-            1 => 'n',
-            2 => 'b',
-            3 => 'r',
-            4 => 'q',
-            _ => 'q',
-        })
-    }
-    s
-}
-
-fn str_to_move(b: &Board, s: &str) -> Option<Move> {
-    if s.len() < 4 {
-        return None;
-    }
-    let from = sq_from_str(&s[0..2])?;
-    let to = sq_from_str(&s[2..4])?;
-    let promo = if s.len() == 5 {
-        match &s[4..5] {
-            "n" => 1,
-            "b" => 2,
-            "r" => 3,
-            "q" => 4,
-            _ => 4,
-        }
-    } else {
-        255
-    };
-    let mut list = Vec::new();
-    b.gen_moves(&mut list);
-    for m in list {
-        if m.from as usize == from
-            && m.to as usize == to
-            && (m.promo == promo || (m.promo == 255 && promo == 255))
-        {
-            return Some(m);
-        }
-    }
-    None
-}

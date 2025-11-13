@@ -1,0 +1,2 @@
+position startpos
+perft 4
