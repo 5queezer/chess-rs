@@ -1,9 +1,9 @@
-const PAWN: usize = 0;
-const KNIGHT: usize = 1;
-const BISHOP: usize = 2;
-const ROOK: usize = 3;
-const QUEEN: usize = 4;
-const KING: usize = 5;
+pub const PAWN: usize = 0;
+pub const KNIGHT: usize = 1;
+pub const BISHOP: usize = 2;
+pub const ROOK: usize = 3;
+pub const QUEEN: usize = 4;
+pub const KING: usize = 5;
 
 pub const FLAG_CAPTURE: u8 = 1;
 pub const FLAG_EN_PASSANT: u8 = 2;

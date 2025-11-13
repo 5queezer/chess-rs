@@ -46,6 +46,37 @@ static PST_W: [[i32; 64]; 6] = [
 ];
 
 const MAX_PLY: usize = 128;
+const HISTORY_MAX: i32 = 1 << 16;
+const ASPIRATION_WINDOW: i32 = 50;
+const BISHOP_PAIR_BONUS: i32 = 40;
+const ROOK_OPEN_BONUS: i32 = 25;
+const ROOK_SEMI_OPEN_BONUS: i32 = 12;
+const DOUBLED_PAWN_PENALTY: i32 = 12;
+const ISOLATED_PAWN_PENALTY: i32 = 15;
+
+const FILE_MASKS: [u64; 8] = [
+    0x0101010101010101,
+    0x0202020202020202,
+    0x0404040404040404,
+    0x0808080808080808,
+    0x1010101010101010,
+    0x2020202020202020,
+    0x4040404040404040,
+    0x8080808080808080,
+];
+
+type HistoryTable = [[[i32; 64]; 64]; 2];
+
+const ADJACENT_FILES: [u64; 8] = [
+    FILE_MASKS[1],
+    FILE_MASKS[0] | FILE_MASKS[2],
+    FILE_MASKS[1] | FILE_MASKS[3],
+    FILE_MASKS[2] | FILE_MASKS[4],
+    FILE_MASKS[3] | FILE_MASKS[5],
+    FILE_MASKS[4] | FILE_MASKS[6],
+    FILE_MASKS[5] | FILE_MASKS[7],
+    FILE_MASKS[6],
+];
 
 fn eval(b: &Board) -> i32 {
     let mut s = 0;
@@ -59,6 +90,22 @@ fn eval(b: &Board) -> i32 {
             }
         }
     }
+    let white = Side::White as usize;
+    let black = Side::Black as usize;
+    if b.bb_piece[white][BISHOP].count_ones() >= 2 {
+        s += BISHOP_PAIR_BONUS;
+    }
+    if b.bb_piece[black][BISHOP].count_ones() >= 2 {
+        s -= BISHOP_PAIR_BONUS;
+    }
+    let white_pawns = b.bb_piece[white][PAWN];
+    let black_pawns = b.bb_piece[black][PAWN];
+    let white_rooks = b.bb_piece[white][ROOK];
+    let black_rooks = b.bb_piece[black][ROOK];
+    s += rook_file_score(white_rooks, white_pawns, black_pawns);
+    s -= rook_file_score(black_rooks, black_pawns, white_pawns);
+    s -= pawn_structure_penalty(white_pawns);
+    s += pawn_structure_penalty(black_pawns);
     s
 }
 #[inline]
@@ -96,22 +143,54 @@ struct SearchInstance {
     start: Instant,
     time_limit: Duration,
     killers: [[Option<Move>; 2]; MAX_PLY],
+    history: HistoryTable,
 }
 
 impl SearchInstance {
     fn search(&mut self, b: &mut Board, depth: i32) -> (i32, Option<Move>) {
         let mut best = None;
         let mut score = 0;
-        for d in 1..=depth {
-            let (sc, bm) = self.alpha_beta(b, d, -30000, 30000, 0);
-            if self.searcher.stop.load(Ordering::Relaxed) {
+        let mut prev_score = 0;
+        'iter: for d in 1..=depth {
+            if self.timed_out() {
                 break;
             }
-            score = sc;
-            if bm.is_some() {
-                best = bm;
+            let mut window = ASPIRATION_WINDOW;
+            let mut alpha = -30000;
+            let mut beta = 30000;
+            let mut use_aspiration = d > 1;
+            if use_aspiration {
+                alpha = (prev_score - window).max(-30000);
+                beta = (prev_score + window).min(30000);
             }
-            if self.timed_out() {
+            loop {
+                let (sc, bm) = self.alpha_beta(b, d, alpha, beta, 0);
+                if self.searcher.stop.load(Ordering::Relaxed) {
+                    break 'iter;
+                }
+                if use_aspiration && sc <= alpha {
+                    window *= 2;
+                    alpha = (prev_score - window).max(-30000);
+                    beta = (prev_score + window).min(30000);
+                    if alpha <= -30000 && beta >= 30000 {
+                        use_aspiration = false;
+                    }
+                    continue;
+                }
+                if use_aspiration && sc >= beta {
+                    window *= 2;
+                    alpha = (prev_score - window).max(-30000);
+                    beta = (prev_score + window).min(30000);
+                    if alpha <= -30000 && beta >= 30000 {
+                        use_aspiration = false;
+                    }
+                    continue;
+                }
+                score = sc;
+                if bm.is_some() {
+                    best = bm;
+                }
+                prev_score = sc;
                 break;
             }
         }
@@ -141,6 +220,7 @@ impl SearchInstance {
             return (0, None);
         }
         self.nodes += 1;
+        let stm = b.stm;
         let mut depth = depth;
         let in_check = b.in_check(b.stm);
         if in_check {
@@ -149,6 +229,7 @@ impl SearchInstance {
         if depth <= 0 {
             return (self.qsearch(b, alpha, beta), None);
         }
+        let static_eval = eval(b);
         let mut pv_move = None;
         if let Some(tt) = self.probe(b.hash) {
             if tt.depth >= depth {
@@ -173,7 +254,12 @@ impl SearchInstance {
             pv_move = tt.best;
         }
 
-        if depth >= 3 && !in_check && ply < MAX_PLY - 1 && has_non_king_material(b, b.stm) {
+        if depth >= 3
+            && !in_check
+            && ply < MAX_PLY - 1
+            && has_non_king_material(b, stm)
+            && static_eval >= beta
+        {
             let reduction = 2;
             let r_depth = depth - 1 - reduction;
             if r_depth > 0 {
@@ -200,16 +286,25 @@ impl SearchInstance {
         } else {
             [None, None]
         };
-        let stm = b.stm;
         let board_ref: &Board = b;
-        moves.sort_by(|lhs, rhs| {
-            move_score(board_ref, rhs, pv_move, &killers, stm)
-                .cmp(&move_score(board_ref, lhs, pv_move, &killers, stm))
-        });
+        {
+            let history = &self.history;
+            moves.sort_by(|lhs, rhs| {
+                move_score(board_ref, rhs, pv_move, &killers, stm, history)
+                    .cmp(&move_score(board_ref, lhs, pv_move, &killers, stm, history))
+            });
+        }
         let mut best = None;
         let mut flag = 2;
         let mut legal_moves = 0;
         for (idx, m) in moves.into_iter().enumerate() {
+            let is_quiet = (m.flags & FLAG_CAPTURE) == 0 && m.promo == 255;
+            if !in_check && depth <= 2 && is_quiet {
+                let margin = 100 * depth + 50;
+                if static_eval + margin <= alpha {
+                    continue;
+                }
+            }
             b.make_move(m);
             if b.in_check(b.stm.flip()) {
                 b.unmake();
@@ -243,6 +338,9 @@ impl SearchInstance {
                 alpha = score;
                 best = Some(m);
                 flag = 0;
+                if is_quiet {
+                    self.update_history(stm, m, depth);
+                }
                 if alpha >= beta {
                     if (m.flags & FLAG_CAPTURE) == 0 && m.promo == 255 {
                         self.store_killer(ply, m);
@@ -296,9 +394,19 @@ impl SearchInstance {
         }
         let mut moves = Vec::with_capacity(32);
         b.gen_moves(&mut moves);
-        moves.retain(|m| m.flags & FLAG_CAPTURE != 0 || m.promo != 255);
         for m in moves {
+            let is_capture = (m.flags & FLAG_CAPTURE) != 0;
+            let is_promo = m.promo != 255;
             b.make_move(m);
+            if b.in_check(b.stm.flip()) {
+                b.unmake();
+                continue;
+            }
+            let gives_check = b.in_check(b.stm);
+            if !is_capture && !is_promo && !gives_check {
+                b.unmake();
+                continue;
+            }
             let sc = -self.qsearch(b, -beta, -alpha);
             b.unmake();
             if sc >= beta {
@@ -320,6 +428,21 @@ impl SearchInstance {
             self.killers[ply][0] = Some(m);
         }
     }
+
+    fn update_history(&mut self, side: Side, m: Move, depth: i32) {
+        if depth <= 0 {
+            return;
+        }
+        let idx = side as usize;
+        let from = m.from as usize;
+        let to = m.to as usize;
+        let bonus = depth * depth;
+        let entry = &mut self.history[idx][from][to];
+        *entry += bonus;
+        if *entry > HISTORY_MAX {
+            *entry = HISTORY_MAX;
+        }
+    }
 }
 
 fn move_score(
@@ -328,6 +451,7 @@ fn move_score(
     pv_move: Option<Move>,
     killers: &[Option<Move>; 2],
     stm: Side,
+    history: &HistoryTable,
 ) -> i32 {
     if let Some(pv) = pv_move {
         if pv == *m {
@@ -343,7 +467,7 @@ fn move_score(
     if m.promo != 255 {
         return 700_000;
     }
-    0
+    500_000 + history[stm as usize][m.from as usize][m.to as usize]
 }
 
 fn mvv_lva(b: &Board, m: &Move, stm: Side) -> i32 {
@@ -360,8 +484,43 @@ fn mvv_lva(b: &Board, m: &Move, stm: Side) -> i32 {
 
 fn has_non_king_material(b: &Board, side: Side) -> bool {
     let mut occ = b.bb_side[side as usize];
-    occ &= !b.bb_piece[side as usize][5];
+    occ &= !b.bb_piece[side as usize][KING];
     occ != 0
+}
+
+fn rook_file_score(rooks: u64, own_pawns: u64, opp_pawns: u64) -> i32 {
+    let mut score = 0;
+    for file in 0..8 {
+        let mask = FILE_MASKS[file];
+        if rooks & mask == 0 {
+            continue;
+        }
+        let own = own_pawns & mask != 0;
+        let opp = opp_pawns & mask != 0;
+        if !own && !opp {
+            score += ROOK_OPEN_BONUS;
+        } else if !own && opp {
+            score += ROOK_SEMI_OPEN_BONUS;
+        }
+    }
+    score
+}
+
+fn pawn_structure_penalty(pawns: u64) -> i32 {
+    let mut penalty = 0;
+    for file in 0..8 {
+        let mask = FILE_MASKS[file];
+        let count = (pawns & mask).count_ones() as i32;
+        if count > 1 {
+            penalty += DOUBLED_PAWN_PENALTY * (count - 1);
+        }
+        if count > 0 {
+            if (pawns & ADJACENT_FILES[file]) == 0 {
+                penalty += ISOLATED_PAWN_PENALTY;
+            }
+        }
+    }
+    penalty
 }
 
 fn main() {
@@ -436,6 +595,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                 start: Instant::now(),
                 time_limit: Duration::from_millis(time_ms),
                 killers: [[None; 2]; MAX_PLY],
+                history: [[[0; 64]; 64]; 2],
             };
             let (score, mv) = si.search(&mut b2, depth);
             if let Some(m) = mv {
@@ -492,6 +652,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                 start: Instant::now(),
                 time_limit: Duration::from_millis(5000),
                 killers: [[None; 2]; MAX_PLY],
+                history: [[[0; 64]; 64]; 2],
             };
             let (_score, mv) = si.search(&mut b2, depth);
             if let Some(m) = mv {
@@ -521,6 +682,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                 start: Instant::now(),
                 time_limit: Duration::from_millis(2000),
                 killers: [[None; 2]; MAX_PLY],
+                history: [[[0; 64]; 64]; 2],
             };
             let (_score, mv) = si.search(&mut b2, depth);
             if let Some(m) = mv {
