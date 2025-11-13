@@ -45,6 +45,8 @@ static PST_W: [[i32; 64]; 6] = [
     ],
 ];
 
+const MAX_PLY: usize = 128;
+
 fn eval(b: &Board) -> i32 {
     let mut s = 0;
     for c in 0..2 {
@@ -93,6 +95,7 @@ struct SearchInstance {
     nodes: u64,
     start: Instant,
     time_limit: Duration,
+    killers: [[Option<Move>; 2]; MAX_PLY],
 }
 
 impl SearchInstance {
@@ -100,7 +103,7 @@ impl SearchInstance {
         let mut best = None;
         let mut score = 0;
         for d in 1..=depth {
-            let (sc, bm) = self.alpha_beta(b, d, -30000, 30000);
+            let (sc, bm) = self.alpha_beta(b, d, -30000, 30000, 0);
             if self.searcher.stop.load(Ordering::Relaxed) {
                 break;
             }
@@ -131,22 +134,29 @@ impl SearchInstance {
         depth: i32,
         mut alpha: i32,
         beta: i32,
+        ply: usize,
     ) -> (i32, Option<Move>) {
         if self.timed_out() || self.searcher.stop.load(Ordering::Relaxed) {
             self.searcher.stop.store(true, Ordering::Relaxed);
             return (0, None);
         }
         self.nodes += 1;
-        if depth == 0 {
+        let mut depth = depth;
+        let in_check = b.in_check(b.stm);
+        if in_check {
+            depth += 1;
+        }
+        if depth <= 0 {
             return (self.qsearch(b, alpha, beta), None);
         }
+        let mut pv_move = None;
         if let Some(tt) = self.probe(b.hash) {
             if tt.depth >= depth {
                 match tt.flag {
                     0 => return (tt.score, tt.best),
                     1 => {
                         if tt.score > alpha {
-                            alpha = tt.score
+                            alpha = tt.score;
                         }
                     }
                     2 => {
@@ -160,47 +170,102 @@ impl SearchInstance {
                     return (tt.score, tt.best);
                 }
             }
+            pv_move = tt.best;
         }
-        let mut moves = Vec::with_capacity(64);
-        b.gen_moves(&mut moves);
-        if moves.is_empty() {
-            if b.in_check(b.stm) {
-                return (-29000 + (5 - depth), None);
-            } else {
-                return (0, None);
-            }
-        }
-        if let Some(tt) = self.probe(b.hash) {
-            if let Some(pv) = tt.best {
-                if let Some(i) = moves.iter().position(|m| {
-                    m.from == pv.from && m.to == pv.to && m.promo == pv.promo && m.flags == pv.flags
-                }) {
-                    moves.swap(0, i);
+
+        if depth >= 3 && !in_check && ply < MAX_PLY - 1 && has_non_king_material(b, b.stm) {
+            let reduction = 2;
+            let r_depth = depth - 1 - reduction;
+            if r_depth > 0 {
+                let null_state = b.make_null_move();
+                let score = -self.alpha_beta(b, r_depth, -beta, -beta + 1, ply + 1).0;
+                b.unmake_null_move(null_state);
+                if score >= beta {
+                    return (beta, None);
                 }
             }
         }
-        moves.sort_by_key(|m| ((m.flags & FLAG_CAPTURE) != 0) as i32 * 1000 + (m.promo != 255) as i32 * 500);
-        moves.reverse();
+
+        let mut moves = Vec::with_capacity(64);
+        b.gen_moves(&mut moves);
+        if moves.is_empty() {
+            if in_check {
+                return (-29000 + ply as i32, None);
+            }
+            return (0, None);
+        }
+
+        let killers = if ply < MAX_PLY {
+            self.killers[ply]
+        } else {
+            [None, None]
+        };
+        let stm = b.stm;
+        let board_ref: &Board = b;
+        moves.sort_by(|lhs, rhs| {
+            move_score(board_ref, rhs, pv_move, &killers, stm)
+                .cmp(&move_score(board_ref, lhs, pv_move, &killers, stm))
+        });
         let mut best = None;
         let mut flag = 2;
-        for m in moves {
+        let mut legal_moves = 0;
+        for (idx, m) in moves.into_iter().enumerate() {
             b.make_move(m);
             if b.in_check(b.stm.flip()) {
                 b.unmake();
                 continue;
             }
-            let (sc, _) = self.alpha_beta(b, depth - 1, -beta, -alpha);
-            let sc = -sc;
+            legal_moves += 1;
+            let gives_check = b.in_check(b.stm);
+            let mut new_depth = depth - 1;
+            if depth >= 3
+                && idx >= 4
+                && (m.flags & FLAG_CAPTURE) == 0
+                && m.promo == 255
+                && !gives_check
+            {
+                new_depth -= 1;
+            }
+            if new_depth < 0 {
+                new_depth = 0;
+            }
+            let mut score;
+            if best.is_none() {
+                score = -self.alpha_beta(b, new_depth, -beta, -alpha, ply + 1).0;
+            } else {
+                score = -self.alpha_beta(b, new_depth, -alpha - 1, -alpha, ply + 1).0;
+                if score > alpha && score < beta {
+                    score = -self.alpha_beta(b, new_depth, -beta, -alpha, ply + 1).0;
+                }
+            }
             b.unmake();
-            if sc > alpha {
-                alpha = sc;
+            if score > alpha {
+                alpha = score;
                 best = Some(m);
                 flag = 0;
                 if alpha >= beta {
+                    if (m.flags & FLAG_CAPTURE) == 0 && m.promo == 255 {
+                        self.store_killer(ply, m);
+                    }
                     flag = 1;
-                    break;
+                    self.store(
+                        b.hash,
+                        TTEntry {
+                            depth,
+                            score: alpha,
+                            flag,
+                            best,
+                        },
+                    );
+                    return (alpha, best);
                 }
             }
+        }
+        if legal_moves == 0 {
+            if in_check {
+                return (-29000 + ply as i32, None);
+            }
+            return (0, None);
         }
         self.store(
             b.hash,
@@ -222,6 +287,10 @@ impl SearchInstance {
         if stand >= beta {
             return beta;
         }
+        const DELTA_PRUNE: i32 = 200;
+        if stand + DELTA_PRUNE < alpha {
+            return alpha;
+        }
         if stand > alpha {
             alpha = stand
         }
@@ -241,6 +310,58 @@ impl SearchInstance {
         }
         alpha
     }
+
+    fn store_killer(&mut self, ply: usize, m: Move) {
+        if ply >= MAX_PLY {
+            return;
+        }
+        if self.killers[ply][0] != Some(m) {
+            self.killers[ply][1] = self.killers[ply][0];
+            self.killers[ply][0] = Some(m);
+        }
+    }
+}
+
+fn move_score(
+    board: &Board,
+    m: &Move,
+    pv_move: Option<Move>,
+    killers: &[Option<Move>; 2],
+    stm: Side,
+) -> i32 {
+    if let Some(pv) = pv_move {
+        if pv == *m {
+            return 1_000_000;
+        }
+    }
+    if killers.iter().any(|&k| k == Some(*m)) {
+        return 900_000;
+    }
+    if (m.flags & FLAG_CAPTURE) != 0 {
+        return 800_000 + mvv_lva(board, m, stm);
+    }
+    if m.promo != 255 {
+        return 700_000;
+    }
+    0
+}
+
+fn mvv_lva(b: &Board, m: &Move, stm: Side) -> i32 {
+    let victim = b
+        .piece_at(stm.flip(), m.to as usize)
+        .map(|p| MVAL[p])
+        .unwrap_or(0);
+    let attacker = b
+        .piece_at(stm, m.from as usize)
+        .map(|p| MVAL[p])
+        .unwrap_or(0);
+    victim * 10 - attacker
+}
+
+fn has_non_king_material(b: &Board, side: Side) -> bool {
+    let mut occ = b.bb_side[side as usize];
+    occ &= !b.bb_piece[side as usize][5];
+    occ != 0
 }
 
 fn main() {
@@ -314,6 +435,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                 nodes: 0,
                 start: Instant::now(),
                 time_limit: Duration::from_millis(time_ms),
+                killers: [[None; 2]; MAX_PLY],
             };
             let (score, mv) = si.search(&mut b2, depth);
             if let Some(m) = mv {
@@ -369,6 +491,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                 nodes: 0,
                 start: Instant::now(),
                 time_limit: Duration::from_millis(5000),
+                killers: [[None; 2]; MAX_PLY],
             };
             let (_score, mv) = si.search(&mut b2, depth);
             if let Some(m) = mv {
@@ -397,6 +520,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                 nodes: 0,
                 start: Instant::now(),
                 time_limit: Duration::from_millis(2000),
+                killers: [[None; 2]; MAX_PLY],
             };
             let (_score, mv) = si.search(&mut b2, depth);
             if let Some(m) = mv {

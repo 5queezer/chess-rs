@@ -50,6 +50,14 @@ pub struct Undo {
     pub hash: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct NullState {
+    pub ep: u8,
+    pub half_move: u8,
+    pub full_move: u16,
+    pub hash: u64,
+}
+
 #[derive(Clone)]
 pub struct Board {
     pub bb_piece: [[u64; 6]; 2],
@@ -265,6 +273,35 @@ impl Board {
 
         self.stm = self.stm.flip();
         self.hash ^= unsafe { ZOBRIST_STM };
+    }
+
+    pub fn make_null_move(&mut self) -> NullState {
+        let state = NullState {
+            ep: self.ep,
+            half_move: self.half_move,
+            full_move: self.full_move,
+            hash: self.hash,
+        };
+        if self.ep != 255 {
+            self.hash ^= unsafe { ZOBRIST_EP[(self.ep % 8) as usize] };
+        }
+        self.ep = 255;
+        self.half_move += 1;
+        if self.stm == Side::Black {
+            self.full_move += 1;
+        }
+        self.stm = self.stm.flip();
+        self.hash ^= unsafe { ZOBRIST_STM };
+        state
+    }
+
+    pub fn unmake_null_move(&mut self, state: NullState) {
+        self.stm = self.stm.flip();
+        self.hash ^= unsafe { ZOBRIST_STM };
+        self.ep = state.ep;
+        self.half_move = state.half_move;
+        self.full_move = state.full_move;
+        self.hash = state.hash;
     }
 
     fn move_rook_for_castle(&mut self, from: usize, to: usize, side: Side) {
