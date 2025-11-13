@@ -5,6 +5,16 @@ const ROOK: usize = 3;
 const QUEEN: usize = 4;
 const KING: usize = 5;
 
+pub const FLAG_CAPTURE: u8 = 1;
+pub const FLAG_EN_PASSANT: u8 = 2;
+pub const FLAG_CASTLE: u8 = 4;
+
+const FILE_A: u64 = 0x0101010101010101;
+const FILE_H: u64 = 0x8080808080808080;
+const RANK_3: u64 = 0x0000000000FF0000;
+const RANK_6: u64 = 0x0000FF0000000000;
+const PROMOTION_PIECES: [u8; 4] = [KNIGHT as u8, BISHOP as u8, ROOK as u8, QUEEN as u8];
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Side {
     White,
@@ -166,9 +176,23 @@ impl Board {
     }
 
     pub fn make_move(&mut self, m: Move) {
+        let stm = self.stm;
+        let from = m.from as usize;
+        let to = m.to as usize;
+        let capture_sq = if m.flags & FLAG_EN_PASSANT != 0 {
+            if stm == Side::White {
+                to - 8
+            } else {
+                to + 8
+            }
+        } else {
+            to
+        };
         let undo = Undo {
             m,
-            captured: self.piece_at(self.stm.flip(), m.to as usize).map_or(255, |p| p as u8),
+            captured: self
+                .piece_at(self.stm.flip(), capture_sq)
+                .map_or(255, |p| p as u8),
             castling: self.castling,
             ep: self.ep,
             half_move: self.half_move,
@@ -176,9 +200,6 @@ impl Board {
         };
         self.hist.push(undo);
 
-        let stm = self.stm;
-        let from = m.from as usize;
-        let to = m.to as usize;
         let moved = self.piece_at(stm, from).unwrap();
 
         if moved == PAWN || undo.captured != 255 {
@@ -202,9 +223,10 @@ impl Board {
 
         if undo.captured != 255 {
             let captured_piece = undo.captured as usize;
-            self.bb_piece[stm.flip() as usize][captured_piece] ^= 1u64 << to;
-            self.bb_side[stm.flip() as usize] ^= 1u64 << to;
-            self.hash ^= unsafe { ZOBRIST_PIECE[stm.flip() as usize][captured_piece][to] };
+            self.bb_piece[stm.flip() as usize][captured_piece] ^= 1u64 << capture_sq;
+            self.bb_side[stm.flip() as usize] ^= 1u64 << capture_sq;
+            self.hash ^=
+                unsafe { ZOBRIST_PIECE[stm.flip() as usize][captured_piece][capture_sq] };
         }
 
         if moved == PAWN {
@@ -219,12 +241,37 @@ impl Board {
             }
         }
 
+        if m.flags & FLAG_CASTLE != 0 {
+            match (stm, to) {
+                (Side::White, 6) => {
+                    self.move_rook_for_castle(7, 5, stm);
+                }
+                (Side::White, 2) => {
+                    self.move_rook_for_castle(0, 3, stm);
+                }
+                (Side::Black, 62) => {
+                    self.move_rook_for_castle(63, 61, stm);
+                }
+                (Side::Black, 58) => {
+                    self.move_rook_for_castle(56, 59, stm);
+                }
+                _ => {}
+            }
+        }
+
         self.hash ^= unsafe { ZOBRIST_CASTLE[self.castling as usize] };
         self.castling &= unsafe { CASTLE_MASK[from] & CASTLE_MASK[to] };
         self.hash ^= unsafe { ZOBRIST_CASTLE[self.castling as usize] };
 
         self.stm = self.stm.flip();
         self.hash ^= unsafe { ZOBRIST_STM };
+    }
+
+    fn move_rook_for_castle(&mut self, from: usize, to: usize, side: Side) {
+        self.bb_piece[side as usize][ROOK] ^= (1u64 << from) | (1u64 << to);
+        self.bb_side[side as usize] ^= (1u64 << from) | (1u64 << to);
+        self.hash ^= unsafe { ZOBRIST_PIECE[side as usize][ROOK][from] };
+        self.hash ^= unsafe { ZOBRIST_PIECE[side as usize][ROOK][to] };
     }
 
     pub fn unmake(&mut self) {
@@ -256,10 +303,41 @@ impl Board {
         self.bb_piece[stm as usize][moved] ^= (1u64 << from) | (1u64 << to);
         self.bb_side[stm as usize] ^= (1u64 << from) | (1u64 << to);
 
+        if m.flags & FLAG_CASTLE != 0 {
+            match (stm, to) {
+                (Side::White, 6) => {
+                    self.bb_piece[stm as usize][ROOK] ^= (1u64 << 7) | (1u64 << 5);
+                    self.bb_side[stm as usize] ^= (1u64 << 7) | (1u64 << 5);
+                }
+                (Side::White, 2) => {
+                    self.bb_piece[stm as usize][ROOK] ^= (1u64 << 0) | (1u64 << 3);
+                    self.bb_side[stm as usize] ^= (1u64 << 0) | (1u64 << 3);
+                }
+                (Side::Black, 62) => {
+                    self.bb_piece[stm as usize][ROOK] ^= (1u64 << 63) | (1u64 << 61);
+                    self.bb_side[stm as usize] ^= (1u64 << 63) | (1u64 << 61);
+                }
+                (Side::Black, 58) => {
+                    self.bb_piece[stm as usize][ROOK] ^= (1u64 << 56) | (1u64 << 59);
+                    self.bb_side[stm as usize] ^= (1u64 << 56) | (1u64 << 59);
+                }
+                _ => {}
+            }
+        }
+
         if undo.captured != 255 {
             let captured_piece = undo.captured as usize;
-            self.bb_piece[stm.flip() as usize][captured_piece] |= 1u64 << to;
-            self.bb_side[stm.flip() as usize] |= 1u64 << to;
+            let capture_sq = if m.flags & FLAG_EN_PASSANT != 0 {
+                if stm == Side::White {
+                    to - 8
+                } else {
+                    to + 8
+                }
+            } else {
+                to
+            };
+            self.bb_piece[stm.flip() as usize][captured_piece] |= 1u64 << capture_sq;
+            self.bb_side[stm.flip() as usize] |= 1u64 << capture_sq;
         }
     }
 
@@ -274,11 +352,31 @@ impl Board {
         let bb_occ = bb_opp | bb_own;
 
         if by == Side::White {
-            if sq > 7 && (sq % 8 > 0) && self.bb_piece[Side::White as usize][PAWN] & (1u64 << (sq - 9)) != 0 { return true; }
-            if sq > 7 && (sq % 8 < 7) && self.bb_piece[Side::White as usize][PAWN] & (1u64 << (sq - 7)) != 0 { return true; }
+            if sq >= 9
+                && (sq % 8 > 0)
+                && self.bb_piece[Side::White as usize][PAWN] & (1u64 << (sq - 9)) != 0
+            {
+                return true;
+            }
+            if sq >= 7
+                && (sq % 8 < 7)
+                && self.bb_piece[Side::White as usize][PAWN] & (1u64 << (sq - 7)) != 0
+            {
+                return true;
+            }
         } else {
-            if sq < 56 && (sq % 8 > 0) && self.bb_piece[Side::Black as usize][PAWN] & (1u64 << (sq + 7)) != 0 { return true; }
-            if sq < 56 && (sq % 8 < 7) && self.bb_piece[Side::Black as usize][PAWN] & (1u64 << (sq + 9)) != 0 { return true; }
+            if sq < 56
+                && (sq % 8 > 0)
+                && self.bb_piece[Side::Black as usize][PAWN] & (1u64 << (sq + 7)) != 0
+            {
+                return true;
+            }
+            if sq < 55
+                && (sq % 8 < 7)
+                && self.bb_piece[Side::Black as usize][PAWN] & (1u64 << (sq + 9)) != 0
+            {
+                return true;
+            }
         }
 
         if unsafe { NATT[sq] } & self.bb_piece[by as usize][KNIGHT] != 0 { return true; }
@@ -298,22 +396,119 @@ impl Board {
         let pawns = self.bb_piece[stm as usize][PAWN];
         if stm == Side::White {
             let mut fwd = (pawns << 8) & !bb_occ;
-            let mut dbl = ((fwd & 0xFF0000) << 8) & !bb_occ;
-            let mut l = (pawns << 7) & bb_opp & !0x0101010101010101;
-            let mut r = (pawns << 9) & bb_opp & !0x8080808080808080;
-            while fwd > 0 { let to = pop_lsb(&mut fwd); list.push(Move { from: (to - 8) as u8, to: to as u8, promo: 255, flags: 0 }); }
-            while dbl > 0 { let to = pop_lsb(&mut dbl); list.push(Move { from: (to - 16) as u8, to: to as u8, promo: 255, flags: 0 }); }
-            while l > 0 { let to = pop_lsb(&mut l); list.push(Move { from: (to - 7) as u8, to: to as u8, promo: 255, flags: 1 }); }
-            while r > 0 { let to = pop_lsb(&mut r); list.push(Move { from: (to - 9) as u8, to: to as u8, promo: 255, flags: 1 }); }
+            let mut dbl = ((fwd & RANK_3) << 8) & !bb_occ;
+            while fwd > 0 {
+                let to = pop_lsb(&mut fwd);
+                let from_sq = to - 8;
+                if to >= 56 {
+                    for &promo in &PROMOTION_PIECES {
+                        list.push(Move { from: from_sq as u8, to: to as u8, promo, flags: 0 });
+                    }
+                } else {
+                    list.push(Move { from: from_sq as u8, to: to as u8, promo: 255, flags: 0 });
+                }
+            }
+            while dbl > 0 {
+                let to = pop_lsb(&mut dbl);
+                list.push(Move { from: (to - 16) as u8, to: to as u8, promo: 255, flags: 0 });
+            }
+            let mut l = ((pawns & !FILE_A) << 7) & bb_opp;
+            let mut r = ((pawns & !FILE_H) << 9) & bb_opp;
+            while l > 0 {
+                let to = pop_lsb(&mut l);
+                let from_sq = to - 7;
+                if to >= 56 {
+                    for &promo in &PROMOTION_PIECES {
+                        list.push(Move { from: from_sq as u8, to: to as u8, promo, flags: FLAG_CAPTURE });
+                    }
+                } else {
+                    list.push(Move { from: from_sq as u8, to: to as u8, promo: 255, flags: FLAG_CAPTURE });
+                }
+            }
+            while r > 0 {
+                let to = pop_lsb(&mut r);
+                let from_sq = to - 9;
+                if to >= 56 {
+                    for &promo in &PROMOTION_PIECES {
+                        list.push(Move { from: from_sq as u8, to: to as u8, promo, flags: FLAG_CAPTURE });
+                    }
+                } else {
+                    list.push(Move { from: from_sq as u8, to: to as u8, promo: 255, flags: FLAG_CAPTURE });
+                }
+            }
         } else {
             let mut fwd = (pawns >> 8) & !bb_occ;
-            let mut dbl = ((fwd & 0xFF000000000000) >> 8) & !bb_occ;
-            let mut l = (pawns >> 9) & bb_opp & !0x0101010101010101;
-            let mut r = (pawns >> 7) & bb_opp & !0x8080808080808080;
-            while fwd > 0 { let to = pop_lsb(&mut fwd); list.push(Move { from: (to + 8) as u8, to: to as u8, promo: 255, flags: 0 }); }
-            while dbl > 0 { let to = pop_lsb(&mut dbl); list.push(Move { from: (to + 16) as u8, to: to as u8, promo: 255, flags: 0 }); }
-            while l > 0 { let to = pop_lsb(&mut l); list.push(Move { from: (to + 9) as u8, to: to as u8, promo: 255, flags: 1 }); }
-            while r > 0 { let to = pop_lsb(&mut r); list.push(Move { from: (to + 7) as u8, to: to as u8, promo: 255, flags: 1 }); }
+            let mut dbl = ((fwd & RANK_6) >> 8) & !bb_occ;
+            while fwd > 0 {
+                let to = pop_lsb(&mut fwd);
+                let from_sq = to + 8;
+                if to < 8 {
+                    for &promo in &PROMOTION_PIECES {
+                        list.push(Move { from: from_sq as u8, to: to as u8, promo, flags: 0 });
+                    }
+                } else {
+                    list.push(Move { from: from_sq as u8, to: to as u8, promo: 255, flags: 0 });
+                }
+            }
+            while dbl > 0 {
+                let to = pop_lsb(&mut dbl);
+                list.push(Move { from: (to + 16) as u8, to: to as u8, promo: 255, flags: 0 });
+            }
+            let mut l = ((pawns & !FILE_A) >> 9) & bb_opp;
+            let mut r = ((pawns & !FILE_H) >> 7) & bb_opp;
+            while l > 0 {
+                let to = pop_lsb(&mut l);
+                let from_sq = to + 9;
+                if to < 8 {
+                    for &promo in &PROMOTION_PIECES {
+                        list.push(Move { from: from_sq as u8, to: to as u8, promo, flags: FLAG_CAPTURE });
+                    }
+                } else {
+                    list.push(Move { from: from_sq as u8, to: to as u8, promo: 255, flags: FLAG_CAPTURE });
+                }
+            }
+            while r > 0 {
+                let to = pop_lsb(&mut r);
+                let from_sq = to + 7;
+                if to < 8 {
+                    for &promo in &PROMOTION_PIECES {
+                        list.push(Move { from: from_sq as u8, to: to as u8, promo, flags: FLAG_CAPTURE });
+                    }
+                } else {
+                    list.push(Move { from: from_sq as u8, to: to as u8, promo: 255, flags: FLAG_CAPTURE });
+                }
+            }
+        }
+
+        if self.ep != 255 {
+            let ep_sq = self.ep as usize;
+            if stm == Side::White {
+                if ep_sq >= 9 && ep_sq % 8 != 0 {
+                    let from_sq = ep_sq - 9;
+                    if pawns & (1u64 << from_sq) != 0 {
+                        list.push(Move { from: from_sq as u8, to: ep_sq as u8, promo: 255, flags: FLAG_CAPTURE | FLAG_EN_PASSANT });
+                    }
+                }
+                if ep_sq >= 7 && ep_sq % 8 != 7 {
+                    let from_sq = ep_sq - 7;
+                    if pawns & (1u64 << from_sq) != 0 {
+                        list.push(Move { from: from_sq as u8, to: ep_sq as u8, promo: 255, flags: FLAG_CAPTURE | FLAG_EN_PASSANT });
+                    }
+                }
+            } else {
+                if ep_sq <= 56 && ep_sq % 8 != 0 {
+                    let from_sq = ep_sq + 7;
+                    if pawns & (1u64 << from_sq) != 0 {
+                        list.push(Move { from: from_sq as u8, to: ep_sq as u8, promo: 255, flags: FLAG_CAPTURE | FLAG_EN_PASSANT });
+                    }
+                }
+                if ep_sq <= 54 && ep_sq % 8 != 7 {
+                    let from_sq = ep_sq + 9;
+                    if pawns & (1u64 << from_sq) != 0 {
+                        list.push(Move { from: from_sq as u8, to: ep_sq as u8, promo: 255, flags: FLAG_CAPTURE | FLAG_EN_PASSANT });
+                    }
+                }
+            }
         }
 
         let knights = self.bb_piece[stm as usize][KNIGHT];
@@ -321,7 +516,12 @@ impl Board {
             let mut attacks = unsafe { NATT[from] };
             attacks &= !bb_own;
             for to in Bitscan::new(attacks) {
-                list.push(Move { from: from as u8, to: to as u8, promo: 255, flags: if bb_opp & (1 << to) > 0 { 1 } else { 0 } });
+                list.push(Move {
+                    from: from as u8,
+                    to: to as u8,
+                    promo: 255,
+                    flags: if bb_opp & (1u64 << to) > 0 { FLAG_CAPTURE } else { 0 },
+                });
             }
         }
 
@@ -339,8 +539,54 @@ impl Board {
                 attacks &= !bb_own;
                 while attacks > 0 {
                     let to = pop_lsb(&mut attacks);
-                    list.push(Move { from: from as u8, to: to as u8, promo: 255, flags: if bb_opp & (1 << to) > 0 { 1 } else { 0 } });
+                    list.push(Move {
+                        from: from as u8,
+                        to: to as u8,
+                        promo: 255,
+                        flags: if bb_opp & (1u64 << to) > 0 { FLAG_CAPTURE } else { 0 },
+                    });
                 }
+            }
+        }
+
+        let king_sq = self.bb_piece[stm as usize][KING].trailing_zeros() as usize;
+        if stm == Side::White {
+            if self.castling & 1 != 0
+                && king_sq == 4
+                && (bb_occ & ((1u64 << 5) | (1u64 << 6))) == 0
+                && !self.is_attacked(4, Side::Black)
+                && !self.is_attacked(5, Side::Black)
+                && !self.is_attacked(6, Side::Black)
+            {
+                list.push(Move { from: 4, to: 6, promo: 255, flags: FLAG_CASTLE });
+            }
+            if self.castling & 2 != 0
+                && king_sq == 4
+                && (bb_occ & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3))) == 0
+                && !self.is_attacked(4, Side::Black)
+                && !self.is_attacked(3, Side::Black)
+                && !self.is_attacked(2, Side::Black)
+            {
+                list.push(Move { from: 4, to: 2, promo: 255, flags: FLAG_CASTLE });
+            }
+        } else {
+            if self.castling & 4 != 0
+                && king_sq == 60
+                && (bb_occ & ((1u64 << 61) | (1u64 << 62))) == 0
+                && !self.is_attacked(60, Side::White)
+                && !self.is_attacked(61, Side::White)
+                && !self.is_attacked(62, Side::White)
+            {
+                list.push(Move { from: 60, to: 62, promo: 255, flags: FLAG_CASTLE });
+            }
+            if self.castling & 8 != 0
+                && king_sq == 60
+                && (bb_occ & ((1u64 << 57) | (1u64 << 58) | (1u64 << 59))) == 0
+                && !self.is_attacked(60, Side::White)
+                && !self.is_attacked(59, Side::White)
+                && !self.is_attacked(58, Side::White)
+            {
+                list.push(Move { from: 60, to: 58, promo: 255, flags: FLAG_CASTLE });
             }
         }
     }
@@ -429,10 +675,46 @@ static mut NATT: [u64; 64] = [0; 64];
 static mut KATT: [u64; 64] = [0; 64];
 
 pub fn init_tables() {
+    const KNIGHT_DIRS: [(i32, i32); 8] = [
+        (-2, -1),
+        (-2, 1),
+        (-1, -2),
+        (-1, 2),
+        (1, -2),
+        (1, 2),
+        (2, -1),
+        (2, 1),
+    ];
+
     for sq in 0..64 {
+        let rank = (sq / 8) as i32;
+        let file = (sq % 8) as i32;
+
         unsafe {
-            NATT[sq] = 1u64.wrapping_shl(17).wrapping_shr(sq as u32) | 1u64.wrapping_shl(15).wrapping_shr(sq as u32) | 1u64.wrapping_shl(10).wrapping_shr(sq as u32) | 1u64.wrapping_shl(6).wrapping_shr(sq as u32);
-            KATT[sq] = 1u64.wrapping_shl(9).wrapping_shr(sq as u32) | 1u64.wrapping_shl(8).wrapping_shr(sq as u32) | 1u64.wrapping_shl(7).wrapping_shr(sq as u32) | 1u64.wrapping_shl(1).wrapping_shr(sq as u32) | 1u64.wrapping_shl(1).wrapping_shl(sq as u32) | 1u64.wrapping_shl(7).wrapping_shl(sq as u32) | 1u64.wrapping_shl(8).wrapping_shl(sq as u32) | 1u64.wrapping_shl(9).wrapping_shl(sq as u32);
+            NATT[sq] = 0;
+            for (dr, df) in KNIGHT_DIRS {
+                let nr = rank + dr;
+                let nf = file + df;
+                if (0..8).contains(&nr) && (0..8).contains(&nf) {
+                    let target = (nr * 8 + nf) as u32;
+                    NATT[sq] |= 1u64 << target;
+                }
+            }
+
+            KATT[sq] = 0;
+            for dr in -1..=1 {
+                for df in -1..=1 {
+                    if dr == 0 && df == 0 {
+                        continue;
+                    }
+                    let nr = rank + dr;
+                    let nf = file + df;
+                    if (0..8).contains(&nr) && (0..8).contains(&nf) {
+                        let target = (nr * 8 + nf) as u32;
+                        KATT[sq] |= 1u64 << target;
+                    }
+                }
+            }
         }
     }
 }
@@ -445,26 +727,26 @@ fn bishop_attacks(sq: usize, occ: u64) -> u64 {
     for i in 1.. {
         if r + i > 7 || f + i > 7 { break; }
         let to = (r + i) * 8 + (f + i);
-        attacks |= 1 << to;
-        if occ & (1 << to) > 0 { break; }
+        attacks |= 1u64 << to;
+        if occ & (1u64 << to) > 0 { break; }
     }
     for i in 1.. {
         if r + i > 7 || f < i { break; }
         let to = (r + i) * 8 + (f - i);
-        attacks |= 1 << to;
-        if occ & (1 << to) > 0 { break; }
+        attacks |= 1u64 << to;
+        if occ & (1u64 << to) > 0 { break; }
     }
     for i in 1.. {
         if r < i || f + i > 7 { break; }
         let to = (r - i) * 8 + (f + i);
-        attacks |= 1 << to;
-        if occ & (1 << to) > 0 { break; }
+        attacks |= 1u64 << to;
+        if occ & (1u64 << to) > 0 { break; }
     }
     for i in 1.. {
         if r < i || f < i { break; }
         let to = (r - i) * 8 + (f - i);
-        attacks |= 1 << to;
-        if occ & (1 << to) > 0 { break; }
+        attacks |= 1u64 << to;
+        if occ & (1u64 << to) > 0 { break; }
     }
     attacks
 }
@@ -477,26 +759,26 @@ fn rook_attacks(sq: usize, occ: u64) -> u64 {
     for i in 1.. {
         if r + i > 7 { break; }
         let to = (r + i) * 8 + f;
-        attacks |= 1 << to;
-        if occ & (1 << to) > 0 { break; }
+        attacks |= 1u64 << to;
+        if occ & (1u64 << to) > 0 { break; }
     }
     for i in 1.. {
         if r < i { break; }
         let to = (r - i) * 8 + f;
-        attacks |= 1 << to;
-        if occ & (1 << to) > 0 { break; }
+        attacks |= 1u64 << to;
+        if occ & (1u64 << to) > 0 { break; }
     }
     for i in 1.. {
         if f + i > 7 { break; }
         let to = r * 8 + (f + i);
-        attacks |= 1 << to;
-        if occ & (1 << to) > 0 { break; }
+        attacks |= 1u64 << to;
+        if occ & (1u64 << to) > 0 { break; }
     }
     for i in 1.. {
         if f < i { break; }
         let to = r * 8 + (f - i);
-        attacks |= 1 << to;
-        if occ & (1 << to) > 0 { break; }
+        attacks |= 1u64 << to;
+        if occ & (1u64 << to) > 0 { break; }
     }
     attacks
 }

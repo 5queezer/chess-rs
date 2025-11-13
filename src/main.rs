@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{self, Read};
+use std::io::{self, BufRead};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -9,7 +9,6 @@ mod board;
 mod perft;
 
 use board::*;
-use perft::*;
 
 const MVAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
 static PST_W: [[i32; 64]; 6] = [
@@ -180,7 +179,7 @@ impl SearchInstance {
                 }
             }
         }
-        moves.sort_by_key(|m| ((m.flags & 1) != 0) as i32 * 1000 + (m.promo != 255) as i32 * 500);
+        moves.sort_by_key(|m| ((m.flags & FLAG_CAPTURE) != 0) as i32 * 1000 + (m.promo != 255) as i32 * 500);
         moves.reverse();
         let mut best = None;
         let mut flag = 2;
@@ -228,7 +227,7 @@ impl SearchInstance {
         }
         let mut moves = Vec::with_capacity(32);
         b.gen_moves(&mut moves);
-        moves.retain(|m| m.flags & 1 != 0 || m.promo != 255);
+        moves.retain(|m| m.flags & FLAG_CAPTURE != 0 || m.promo != 255);
         for m in moves {
             b.make_move(m);
             let sc = -self.qsearch(b, -beta, -alpha);
@@ -247,13 +246,16 @@ impl SearchInstance {
 fn main() {
     init_tables();
     init_zobrist();
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input).unwrap();
+    let stdin = io::stdin();
     let mut b = Board::startpos();
     let mut searcher = Searcher::new();
     let mut xboard_mode = false;
-    for line in input.lines() {
-        handle_line(line.trim(), &mut b, &mut searcher, &mut xboard_mode);
+    for line in stdin.lock().lines() {
+        if let Ok(line) = line {
+            handle_line(line.trim(), &mut b, &mut searcher, &mut xboard_mode);
+        } else {
+            break;
+        }
     }
 }
 
@@ -443,15 +445,21 @@ fn time_for_move(stm: Side, params: &GoParams) -> u64 {
     if let Some(mt) = params.movetime {
         return mt;
     }
-    let time = if stm == Side::White {
-        params.wtime
+    let (time, inc) = if stm == Side::White {
+        (params.wtime, params.winc)
     } else {
-        params.btime
+        (params.btime, params.binc)
     };
-    if let Some(t) = time {
-        t / 20
-    } else {
-        5000
+    let moves_to_go = params.movestogo.unwrap_or(60).max(1);
+    match time {
+        Some(t) => {
+            let base = t / moves_to_go;
+            let bonus = inc.unwrap_or(0) / 2;
+            let slice = base + bonus;
+            let max_allowed = t.saturating_sub(50).max(50);
+            slice.max(50).min(max_allowed)
+        }
+        None => 2000,
     }
 }
 
@@ -473,7 +481,10 @@ fn xboard_make_move(cmd: &str, b: &mut Board) {
 struct GoParams {
     wtime: Option<u64>,
     btime: Option<u64>,
+    winc: Option<u64>,
+    binc: Option<u64>,
     movetime: Option<u64>,
+    movestogo: Option<u64>,
     depth: Option<i32>,
 }
 
@@ -485,7 +496,10 @@ fn parse_go(s: &str) -> GoParams {
         match tok {
             "wtime" => params.wtime = it.next().and_then(|x| x.parse().ok()),
             "btime" => params.btime = it.next().and_then(|x| x.parse().ok()),
+            "winc" => params.winc = it.next().and_then(|x| x.parse().ok()),
+            "binc" => params.binc = it.next().and_then(|x| x.parse().ok()),
             "movetime" => params.movetime = it.next().and_then(|x| x.parse().ok()),
+            "movestogo" => params.movestogo = it.next().and_then(|x| x.parse().ok()),
             "depth" => params.depth = it.next().and_then(|x| x.parse().ok()),
             _ => {}
         }
@@ -517,4 +531,3 @@ fn set_position(cmd: &str, b: &mut Board) {
         }
     }
 }
-
