@@ -1,124 +1,19 @@
-use std::collections::HashMap;
-
-#[inline]
-pub fn bb(sq: usize) -> u64 {
-    1u64 << sq
-}
-#[inline]
-pub fn lsb(x: u64) -> usize {
-    x.trailing_zeros() as usize
-}
-#[inline]
-pub fn pop_lsb(x: &mut u64) -> usize {
-    let s = lsb(*x);
-    *x &= *x - 1;
-    s
-}
-
-pub const FILE_A: u64 = 0x0101010101010101;
-pub const FILE_H: u64 = 0x8080808080808080;
-pub const RANK_3: u64 = 0x0000000000FF0000;
-pub const RANK_6: u64 = 0x0000FF0000000000;
-
-pub fn sq_from_str(s: &str) -> Option<usize> {
-    if s.len() != 2 {
-        return None;
-    }
-    let b = s.as_bytes();
-    let f = (b[0] as char).to_ascii_lowercase() as u8;
-    let r = (b[1] as char) as u8;
-    if !(b"abcdefgh".contains(&f) && b"12345678".contains(&r)) {
-        return None;
-    }
-    Some(((r - b'1') as usize) * 8 + ((f - b'a') as usize))
-}
-
-pub fn sq_to_str(sq: usize) -> String {
-    format!(
-        "{}{}",
-        (b'a' + (sq & 7) as u8) as char,
-        (b'1' + (sq / 8) as u8) as char
-    )
-}
-
-pub static mut KNIGHT: [u64; 64] = [0; 64];
-pub static mut KING: [u64; 64] = [0; 64];
-pub static mut PAWN_ATK: [[u64; 64]; 2] = [[0; 64], [0; 64]];
-
-pub fn init_tables() {
-    unsafe {
-        for s in 0..64 {
-            let f = s & 7;
-            let r = s >> 3;
-            let mut m = 0u64;
-            for (df, dr) in [
-                (1, 2),
-                (2, 1),
-                (2, -1),
-                (1, -2),
-                (-1, -2),
-                (-2, -1),
-                (-2, 1),
-                (-1, 2),
-            ] {
-                let nf = f as i32 + df;
-                let nr = r as i32 + dr;
-                if nf >= 0 && nf < 8 && nr >= 0 && nr < 8 {
-                    m |= bb((nr * 8 + nf) as usize)
-                }
-            }
-            KNIGHT[s] = m;
-
-            let mut k = 0u64;
-            for df in -1..=1 {
-                for dr in -1..=1 {
-                    if df == 0 && dr == 0 {
-                        continue;
-                    }
-                    let nf = f as i32 + df;
-                    let nr = r as i32 + dr;
-                    if nf >= 0 && nf < 8 && nr >= 0 && nr < 8 {
-                        k |= bb((nr * 8 + nf) as usize)
-                    }
-                }
-            }
-            KING[s] = k;
-
-            let mut w = 0u64;
-            if f > 0 && r < 7 {
-                w |= bb(s + 7)
-            }
-            if f < 7 && r < 7 {
-                w |= bb(s + 9)
-            }
-            PAWN_ATK[0][s] = w;
-            let mut b = 0u64;
-            if f > 0 && r > 0 {
-                b |= bb(s - 9)
-            }
-            if f < 7 && r > 0 {
-                b |= bb(s - 7)
-            }
-            PAWN_ATK[1][s] = b;
-        }
-    }
-}
+const PAWN: usize = 0;
+const KNIGHT: usize = 1;
+const BISHOP: usize = 2;
+const ROOK: usize = 3;
+const QUEEN: usize = 4;
+const KING: usize = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Side {
-    White = 0,
-    Black = 1,
+    White,
+    Black,
 }
+
 impl Side {
-    pub fn idx(self) -> usize {
-        if self == Side::White {
-            0
-        } else {
-            1
-        }
-    }
-    pub fn flip(self) -> Side {
-        if self == Side::White {
+    pub fn flip(&self) -> Self {
+        if *self == Side::White {
             Side::Black
         } else {
             Side::White
@@ -126,896 +21,513 @@ impl Side {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Piece {
-    P,
-    N,
-    B,
-    R,
-    Q,
-    K,
-}
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Move {
     pub from: u8,
     pub to: u8,
     pub promo: u8,
     pub flags: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Undo {
+    pub m: Move,
     pub captured: u8,
-    pub moved: u8,
-}
-impl Move {
-    pub fn quiet(from: usize, to: usize, moved: u8) -> Self {
-        Self {
-            from: from as u8,
-            to: to as u8,
-            promo: 255,
-            flags: 0,
-            captured: 6,
-            moved,
-        }
-    }
-    pub fn capture(from: usize, to: usize, captured: u8, moved: u8) -> Self {
-        Self {
-            from: from as u8,
-            to: to as u8,
-            promo: 255,
-            flags: 1,
-            captured,
-            moved,
-        }
-    }
-    pub fn promo(from: usize, to: usize, p: u8, cap: bool, captured: u8, moved: u8) -> Self {
-        Self {
-            from: from as u8,
-            to: to as u8,
-            promo: p,
-            flags: if cap {
-                1
-            } else {
-                0
-            },
-            captured,
-            moved,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct State {
     pub castling: u8,
     pub ep: u8,
-    pub halfmove: u16,
+    pub half_move: u8,
     pub hash: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Board {
-    pub bb_side: [u64; 2],
     pub bb_piece: [[u64; 6]; 2],
-    pub occ: u64,
+    pub bb_side: [u64; 2],
     pub stm: Side,
-    pub castling: u8,
     pub ep: u8,
-    pub halfmove: u16,
-    pub fullmove: u16,
+    pub castling: u8,
+    pub half_move: u8,
+    pub full_move: u16,
     pub hash: u64,
-    pub hist: Vec<State>,
-    pub move_hist: Vec<Move>,
-}
-
-pub static mut ZP: [[[u64; 64]; 6]; 2] = [[[0; 64]; 6]; 2];
-pub static mut ZCASTLE: [u64; 16] = [0; 16];
-pub static mut ZEP: [u64; 65] = [0; 65];
-pub static mut ZSTM: u64 = 0;
-
-pub fn rng64(seed: &mut u64) -> u64 {
-    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    *seed
-}
-
-pub fn init_zobrist() {
-    let mut s = 0x9E3779B97F4A7C15u64;
-    unsafe {
-        for c in 0..2 {
-            for p in 0..6 {
-                for sq in 0..64 {
-                    ZP[c][p][sq] = rng64(&mut s);
-                }
-            }
-        }
-        for i in 0..16 {
-            ZCASTLE[i] = rng64(&mut s);
-        }
-        for i in 0..65 {
-            ZEP[i] = rng64(&mut s);
-        }
-        ZSTM = rng64(&mut s);
-    }
+    pub hist: Vec<Undo>,
 }
 
 impl Board {
-    pub fn empty() -> Self {
-        Self {
-            bb_side: [0; 2],
-            bb_piece: [[0; 6]; 2],
-            occ: 0,
-            stm: Side::White,
-            castling: 0,
-            ep: 64,
-            halfmove: 0,
-            fullmove: 1,
-            hash: 0,
-            hist: Vec::new(),
-            move_hist: Vec::new(),
-        }
-    }
-    pub fn compute_occ(&mut self) {
-        self.bb_side[0] = 0;
-        self.bb_side[1] = 0;
-        for s in 0..2 {
-            for p in 0..6 {
-                self.bb_side[s] |= self.bb_piece[s][p];
-            }
-        }
-        self.occ = self.bb_side[0] | self.bb_side[1];
-    }
-    pub fn update_hash(&mut self) {
-        unsafe {
-            self.hash = 0;
-            for c in 0..2 {
-                for p in 0..6 {
-                    let mut b = self.bb_piece[c][p];
-                    while b != 0 {
-                        let s = pop_lsb(&mut b);
-                        self.hash ^= ZP[c][p][s];
-                    }
-                }
-            }
-            self.hash ^= ZCASTLE[self.castling as usize];
-            self.hash ^= ZEP[self.ep as usize];
-            if self.stm == Side::Black {
-                self.hash ^= ZSTM;
-            }
-        }
-    }
-
-    pub fn from_fen(fen: &str) -> Self {
-        let mut b = Board::empty();
-        let parts: Vec<&str> = fen.split_whitespace().collect();
-        let mut sq = 56;
-        for ch in parts[0].chars() {
-            match ch {
-                '/' => {
-                    sq -= 16;
-                }
-                '1'..='8' => {
-                    sq += ch.to_digit(10).unwrap() as usize;
-                }
-                _ => {
-                    let (side, piece) = match ch {
-                        'P' => (0, 0),
-                        'N' => (0, 1),
-                        'B' => (0, 2),
-                        'R' => (0, 3),
-                        'Q' => (0, 4),
-                        'K' => (0, 5),
-                        'p' => (1, 0),
-                        'n' => (1, 1),
-                        'b' => (1, 2),
-                        'r' => (1, 3),
-                        'q' => (1, 4),
-                        'k' => (1, 5),
-                        _ => panic!("bad FEN"),
-                    };
-                    b.bb_piece[side][piece] |= bb(sq);
-                    sq += 1;
-                }
-            }
-        }
-        b.stm = if parts[1] == "w" {
-            Side::White
-        } else {
-            Side::Black
-        };
-        let mut c = 0u8;
-        if parts[2].contains('K') {
-            c |= 1
-        }
-        if parts[2].contains('Q') {
-            c |= 2
-        }
-        if parts[2].contains('k') {
-            c |= 4
-        }
-        if parts[2].contains('q') {
-            c |= 8
-        }
-        b.castling = c;
-        b.ep = if parts[3] == "-" {
-            64
-        } else {
-            sq_from_str(parts[3]).unwrap() as u8
-        };
-        if parts.len() > 4 {
-            b.halfmove = parts[4].parse().unwrap_or(0);
-        }
-        if parts.len() > 5 {
-            b.fullmove = parts[5].parse().unwrap_or(1);
-        }
-        b.compute_occ();
-        b.update_hash();
-        b
-    }
-
-    pub fn startpos() -> Self {
-        Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-    }
-
-    pub fn in_check(&self, side: Side) -> bool {
-        let king_sq = lsb(self.bb_piece[side.idx()][Piece::K as usize]);
-        self.square_attacked(king_sq, side.flip())
-    }
-
-    pub fn square_attacked(&self, sq: usize, by: Side) -> bool {
-        unsafe {
-            if (PAWN_ATK[by.idx()][sq] & self.bb_piece[by.idx()][Piece::P as usize]) != 0 {
-                return true;
-            }
-            if (KNIGHT[sq] & self.bb_piece[by.idx()][Piece::N as usize]) != 0 {
-                return true;
-            }
-            if (KING[sq] & self.bb_piece[by.idx()][Piece::K as usize]) != 0 {
-                return true;
-            }
-        }
-        if (self.ray_attacks(sq, &[-9, -7, 7, 9])
-            & (self.bb_piece[by.idx()][Piece::B as usize]
-                | self.bb_piece[by.idx()][Piece::Q as usize]))
-            != 0
-        {
-            return true;
-        }
-        if (self.ray_attacks(sq, &[-8, -1, 1, 8])
-            & (self.bb_piece[by.idx()][Piece::R as usize]
-                | self.bb_piece[by.idx()][Piece::Q as usize]))
-            != 0
-        {
-            return true;
-        }
-        false
-    }
-
-    pub fn ray_attacks(&self, from: usize, deltas: &[i32]) -> u64 {
-        let mut atk = 0u64;
-        let f0 = (from & 7) as i32;
-        let r0 = (from / 8) as i32;
-        for &d in deltas {
-            let mut s = from as i32 + d;
-            loop {
-                if s < 0 || s >= 64 {
-                    break;
-                }
-                let sf = (s & 7) as i32;
-                let sr = (s / 8) as i32;
-                if (d == 1 || d == -1) && sr != r0 {
-                    break;
-                }
-                if (d == 9 || d == -9 || d == 7 || d == -7) && (sf - f0).abs() != ((sr - r0).abs())
-                {
-                    break;
-                }
-                atk |= bb(s as usize);
-                if (self.occ & bb(s as usize)) != 0 {
-                    break;
-                }
-                s += d;
-            }
-        }
-        atk
-    }
-
-    pub fn gen_moves(&self, list: &mut Vec<Move>) {
-        let us = self.stm.idx();
-        let them = self.stm.flip().idx();
-        let occ_us = self.bb_side[us];
-        let occ_them = self.bb_side[them];
-        let empty = !self.occ;
-        unsafe {
-            let pawns = self.bb_piece[us][Piece::P as usize];
-            if self.stm == Side::White {
-                let single = (pawns << 8) & empty;
-                let double = ((single & RANK_3) << 8) & empty;
-                let mut m = single;
-                while m != 0 {
-                    let to = pop_lsb(&mut m);
-                    let from = to - 8;
-                    if to >= 56 {
-                        for &p in &[Piece::N, Piece::B, Piece::R, Piece::Q] {
-                            list.push(Move::promo(from, to, p as u8, false, 6, Piece::P as u8));
-                        }
-                    } else {
-                        list.push(Move::quiet(from, to, Piece::P as u8));
-                    }
-                }
-                let mut d = double;
-                while d != 0 {
-                    let to = pop_lsb(&mut d);
-                    list.push(Move {
-                        from: (to - 16) as u8,
-                        to: to as u8,
-                        promo: 255,
-                        flags: 8,
-                        captured: 6,
-                        moved: Piece::P as u8,
-                    });
-                }
-                let left = ((pawns & !FILE_A) << 7) & occ_them;
-                let right = ((pawns & !FILE_H) << 9) & occ_them;
-                let mut c = left;
-                while c != 0 {
-                    let to = pop_lsb(&mut c);
-                    let from = to - 7;
-                    let captured = self.piece_at(to, self.stm.flip()).unwrap();
-                    if to >= 56 {
-                        for &p in &[Piece::N, Piece::B, Piece::R, Piece::Q] {
-                            list.push(Move::promo(
-                                from,
-                                to,
-                                p as u8,
-                                true,
-                                captured as u8,
-                                Piece::P as u8,
-                            ));
-                        }
-                    } else {
-                        list.push(Move::capture(from, to, captured as u8, Piece::P as u8));
-                    }
-                }
-                let mut c2 = right;
-                while c2 != 0 {
-                    let to = pop_lsb(&mut c2);
-                    let from = to - 9;
-                    let captured = self.piece_at(to, self.stm.flip()).unwrap();
-                    if to >= 56 {
-                        for &p in &[Piece::N, Piece::B, Piece::R, Piece::Q] {
-                            list.push(Move::promo(
-                                from,
-                                to,
-                                p as u8,
-                                true,
-                                captured as u8,
-                                Piece::P as u8,
-                            ));
-                        }
-                    } else {
-                        list.push(Move::capture(from, to, captured as u8, Piece::P as u8));
-                    }
-                }
-                if self.ep != 64 {
-                    let epb = bb(self.ep as usize);
-                    let left_ep = ((pawns & !FILE_A) << 7) & epb;
-                    if left_ep != 0 {
-                        let to = lsb(left_ep);
-                        list.push(Move {
-                            from: (to - 7) as u8,
-                            to: to as u8,
-                            promo: 255,
-                            flags: 2,
-                            captured: Piece::P as u8,
-                            moved: Piece::P as u8,
-                        });
-                    }
-                    let right_ep = ((pawns & !FILE_H) << 9) & epb;
-                    if right_ep != 0 {
-                        let to = lsb(right_ep);
-                        list.push(Move {
-                            from: (to - 9) as u8,
-                            to: to as u8,
-                            promo: 255,
-                            flags: 2,
-                            captured: Piece::P as u8,
-                            moved: Piece::P as u8,
-                        });
-                    }
-                }
-            } else {
-                let single = (pawns >> 8) & empty;
-                let double = ((single & RANK_6) >> 8) & empty;
-                let mut m = single;
-                while m != 0 {
-                    let to = pop_lsb(&mut m);
-                    let from = to + 8;
-                    if to < 8 {
-                        for &p in &[Piece::N, Piece::B, Piece::R, Piece::Q] {
-                            list.push(Move::promo(from, to, p as u8, false, 6, Piece::P as u8));
-                        }
-                    } else {
-                        list.push(Move::quiet(from, to, Piece::P as u8));
-                    }
-                }
-                let mut d = double;
-                while d != 0 {
-                    let to = pop_lsb(&mut d);
-                    list.push(Move {
-                        from: (to + 16) as u8,
-                        to: to as u8,
-                        promo: 255,
-                        flags: 8,
-                        captured: 6,
-                        moved: Piece::P as u8,
-                    });
-                }
-                let left = ((pawns & !FILE_H) >> 7) & occ_them;
-                let right = ((pawns & !FILE_A) >> 9) & occ_them;
-                let mut c = left;
-                while c != 0 {
-                    let to = pop_lsb(&mut c);
-                    let from = to + 7;
-                    let captured = self.piece_at(to, self.stm.flip()).unwrap();
-                    if to < 8 {
-                        for &p in &[Piece::N, Piece::B, Piece::R, Piece::Q] {
-                            list.push(Move::promo(
-                                from,
-                                to,
-                                p as u8,
-                                true,
-                                captured as u8,
-                                Piece::P as u8,
-                            ));
-                        }
-                    } else {
-                        list.push(Move::capture(from, to, captured as u8, Piece::P as u8));
-                    }
-                }
-                let mut c2 = right;
-                while c2 != 0 {
-                    let to = pop_lsb(&mut c2);
-                    let from = to + 9;
-                    let captured = self.piece_at(to, self.stm.flip()).unwrap();
-                    if to < 8 {
-                        for &p in &[Piece::N, Piece::B, Piece::R, Piece::Q] {
-                            list.push(Move::promo(
-                                from,
-                                to,
-                                p as u8,
-                                true,
-                                captured as u8,
-                                Piece::P as u8,
-                            ));
-                        }
-                    } else {
-                        list.push(Move::capture(from, to, captured as u8, Piece::P as u8));
-                    }
-                }
-                if self.ep != 64 {
-                    let epb = bb(self.ep as usize);
-                    let left_ep = ((pawns & !FILE_H) >> 7) & epb;
-                    if left_ep != 0 {
-                        let to = lsb(left_ep);
-                        list.push(Move {
-                            from: (to + 7) as u8,
-                            to: to as u8,
-                            promo: 255,
-                            flags: 2,
-                            captured: Piece::P as u8,
-                            moved: Piece::P as u8,
-                        });
-                    }
-                    let right_ep = ((pawns & !FILE_A) >> 9) & epb;
-                    if right_ep != 0 {
-                        let to = lsb(right_ep);
-                        list.push(Move {
-                            from: (to + 9) as u8,
-                            to: to as u8,
-                            promo: 255,
-                            flags: 2,
-                            captured: Piece::P as u8,
-                            moved: Piece::P as u8,
-                        });
-                    }
-                }
-            }
-            let mut n = self.bb_piece[us][Piece::N as usize];
-            while n != 0 {
-                let s = pop_lsb(&mut n);
-                let mut m = KNIGHT[s] & !occ_us;
-                while m != 0 {
-                    let t = pop_lsb(&mut m);
-                    if (occ_them & bb(t)) != 0 {
-                        let captured = self.piece_at(t, self.stm.flip()).unwrap();
-                        list.push(Move::capture(s, t, captured as u8, Piece::N as u8));
-                    } else {
-                        list.push(Move::quiet(s, t, Piece::N as u8));
-                    }
-                }
-            }
-            let ksq = lsb(self.bb_piece[us][Piece::K as usize]);
-            let mut km = KING[ksq] & !occ_us;
-            while km != 0 {
-                let t = pop_lsb(&mut km);
-                if (occ_them & bb(t)) != 0 {
-                    let captured = self.piece_at(t, self.stm.flip()).unwrap();
-                    list.push(Move::capture(ksq, t, captured as u8, Piece::K as u8));
-                } else {
-                    list.push(Move::quiet(ksq, t, Piece::K as u8));
-                }
-            }
-            if self.stm == Side::White {
-                if (self.castling & 1) != 0
-                    && (self.occ & (bb(5) | bb(6))) == 0
-                    && !self.square_attacked(4, Side::Black)
-                    && !self.square_attacked(5, Side::Black)
-                    && !self.square_attacked(6, Side::Black)
-                {
-                    list.push(Move {
-                        from: 4,
-                        to: 6,
-                        promo: 255,
-                        flags: 4,
-                        captured: 6,
-                        moved: Piece::K as u8,
-                    });
-                }
-                if (self.castling & 2) != 0
-                    && (self.occ & (bb(3) | bb(2) | bb(1))) == 0
-                    && !self.square_attacked(4, Side::Black)
-                    && !self.square_attacked(3, Side::Black)
-                    && !self.square_attacked(2, Side::Black)
-                {
-                    list.push(Move {
-                        from: 4,
-                        to: 2,
-                        promo: 255,
-                        flags: 4,
-                        captured: 6,
-                        moved: Piece::K as u8,
-                    });
-                }
-            } else {
-                if (self.castling & 4) != 0
-                    && (self.occ & (bb(61) | bb(62))) == 0
-                    && !self.square_attacked(60, Side::White)
-                    && !self.square_attacked(61, Side::White)
-                    && !self.square_attacked(62, Side::White)
-                {
-                    list.push(Move {
-                        from: 60,
-                        to: 62,
-                        promo: 255,
-                        flags: 4,
-                        captured: 6,
-                        moved: Piece::K as u8,
-                    });
-                }
-                if (self.castling & 8) != 0
-                    && (self.occ & (bb(59) | bb(58) | bb(57))) == 0
-                    && !self.square_attacked(60, Side::White)
-                    && !self.square_attacked(59, Side::White)
-                    && !self.square_attacked(58, Side::White)
-                {
-                    list.push(Move {
-                        from: 60,
-                        to: 58,
-                        promo: 255,
-                        flags: 4,
-                        captured: 6,
-                        moved: Piece::K as u8,
-                    });
-                }
-            }
-            self.slide_add(Piece::B, &[-9, -7, 7, 9], occ_us, occ_them, list);
-            self.slide_add(Piece::R, &[-8, -1, 1, 8], occ_us, occ_them, list);
-            self.slide_add(
-                Piece::Q,
-                &[-9, -7, 7, 9, -8, -1, 1, 8],
-                occ_us,
-                occ_them,
-                list,
-            );
-        }
-        list.retain(|m| {
-            let mut tmp = self.clone();
-            tmp.make_move(*m);
-            !tmp.in_check(self.stm)
-        });
-    }
-
-    pub fn slide_add(
-        &self,
-        pc: Piece,
-        deltas: &[i32],
-        occ_us: u64,
-        occ_them: u64,
-        list: &mut Vec<Move>,
-    ) {
-        let mut b = self.bb_piece[self.stm.idx()][pc as usize];
-        while b != 0 {
-            let s = pop_lsb(&mut b);
-            for &d in deltas {
-                let mut t = s as i32 + d;
-                while t >= 0 && t < 64 {
-                    let tf = (t & 7) as i32;
-                    let sf = (s & 7) as i32;
-                    let tr = (t / 8) as i32;
-                    let sr = (s / 8) as i32;
-                    if (d == 1 || d == -1) && tr != sr {
-                        break;
-                    }
-                    if (d == 9 || d == -9) && (tf - sf).abs() != (tr - sr).abs() {
-                        break;
-                    }
-                    if (d == 7 || d == -7) && (tf - sf).abs() != (tr - sr).abs() {
-                        break;
-                    }
-                    let tbb = bb(t as usize);
-                    if (occ_us & tbb) != 0 {
-                        break;
-                    }
-                    if (occ_them & tbb) != 0 {
-                        let captured = self.piece_at(t as usize, self.stm.flip()).unwrap();
-                        list.push(Move::capture(s, t as usize, captured as u8, pc as u8));
-                        break;
-                    } else {
-                        list.push(Move::quiet(s, t as usize, pc as u8));
-                    }
-                    if (self.occ & tbb) != 0 {
-                        break;
-                    }
-                    t += d;
-                }
-            }
-        }
-    }
-
-    pub fn piece_at(&self, sq: usize, side: Side) -> Option<Piece> {
+    pub fn piece_at(&self, side: Side, sq: usize) -> Option<usize> {
         for p in 0..6 {
-            if (self.bb_piece[side.idx()][p] & bb(sq)) != 0 {
-                return Some(match p {
-                    0 => Piece::P,
-                    1 => Piece::N,
-                    2 => Piece::B,
-                    3 => Piece::R,
-                    4 => Piece::Q,
-                    5 => Piece::K,
-                    _ => unreachable!(),
-                });
+            if self.bb_piece[side as usize][p] & (1u64 << sq) != 0 {
+                return Some(p);
             }
         }
         None
     }
 
+    pub fn startpos() -> Self {
+        Self::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+    }
+
+    pub fn from_fen(fen: &str) -> Self {
+        let mut b = Self {
+            bb_piece: [[0; 6]; 2],
+            bb_side: [0; 2],
+            stm: Side::White,
+            ep: 255,
+            castling: 0,
+            half_move: 0,
+            full_move: 1,
+            hash: 0,
+            hist: Vec::new(),
+        };
+
+        let mut it = fen.split_whitespace();
+        let board_str = it.next().unwrap();
+        let mut rank = 7;
+        let mut file = 0;
+        for c in board_str.chars() {
+            if c.is_ascii_digit() {
+                file += c.to_digit(10).unwrap();
+            } else if c == '/' {
+                rank -= 1;
+                file = 0;
+            } else {
+                let side = if c.is_uppercase() {
+                    Side::White
+                } else {
+                    Side::Black
+                };
+                let piece = match c.to_ascii_lowercase() {
+                    'p' => PAWN,
+                    'n' => KNIGHT,
+                    'b' => BISHOP,
+                    'r' => ROOK,
+                    'q' => QUEEN,
+                    'k' => KING,
+                    _ => panic!("invalid piece"),
+                };
+                let sq = rank * 8 + file;
+                b.bb_piece[side as usize][piece] |= 1u64 << sq;
+                b.bb_side[side as usize] |= 1u64 << sq;
+                file += 1;
+            }
+        }
+
+        b.stm = if it.next().unwrap() == "w" {
+            Side::White
+        } else {
+            Side::Black
+        };
+
+        let castling_str = it.next().unwrap();
+        if castling_str.contains('K') {
+            b.castling |= 1;
+        }
+        if castling_str.contains('Q') {
+            b.castling |= 2;
+        }
+        if castling_str.contains('k') {
+            b.castling |= 4;
+        }
+        if castling_str.contains('q') {
+            b.castling |= 8;
+        }
+
+        let ep_str = it.next().unwrap();
+        if ep_str != "-" {
+            b.ep = sq_from_str(ep_str).unwrap() as u8;
+        }
+
+        b.half_move = it.next().unwrap().parse().unwrap();
+        b.full_move = it.next().unwrap().parse().unwrap();
+
+        b.hash = b.calc_hash();
+        b
+    }
+
+    fn calc_hash(&self) -> u64 {
+        let mut h = 0;
+        for c in 0..2 {
+            for p in 0..6 {
+                let mut bbp = self.bb_piece[c][p];
+                while bbp > 0 {
+                    let sq = pop_lsb(&mut bbp);
+                    h ^= unsafe { ZOBRIST_PIECE[c][p][sq] };
+                }
+            }
+        }
+        h ^= unsafe { ZOBRIST_CASTLE[self.castling as usize] };
+        if self.ep != 255 {
+            h ^= unsafe { ZOBRIST_EP[(self.ep % 8) as usize] };
+        }
+        if self.stm == Side::Black {
+            h ^= unsafe { ZOBRIST_STM };
+        }
+        h
+    }
+
     pub fn make_move(&mut self, m: Move) {
-        let us = self.stm.idx();
-        let them = self.stm.flip().idx();
-        self.hist.push(State {
+        let undo = Undo {
+            m,
+            captured: self.piece_at(self.stm.flip(), m.to as usize).map_or(255, |p| p as u8),
             castling: self.castling,
             ep: self.ep,
-            halfmove: self.halfmove,
+            half_move: self.half_move,
             hash: self.hash,
-        });
-        self.move_hist.push(m);
-        self.hash ^= unsafe {
-            ZEP[self.ep as usize]
         };
-        self.ep = 64;
-        self.hash ^= unsafe {
-            ZEP[self.ep as usize]
-        };
-        self.halfmove += 1;
+        self.hist.push(undo);
+
+        let stm = self.stm;
         let from = m.from as usize;
         let to = m.to as usize;
-        if m.flags & 1 != 0 {
-            self.halfmove = 0;
-            if m.flags & 2 != 0 {
-                let cap_sq = if self.stm == Side::White {
-                    to - 8
-                } else {
-                    to + 8
-                };
-                for p in 0..6 {
-                    if (self.bb_piece[them][p] & bb(cap_sq)) != 0 {
-                        self.bb_piece[them][p] ^= bb(cap_sq);
-                        self.hash ^= unsafe {
-                            ZP[them][p][cap_sq]
-                        };
-                        break;
-                    }
-                }
-            } else {
-                for p in 0..6 {
-                    if (self.bb_piece[them][p] & bb(to)) != 0 {
-                        self.bb_piece[them][p] ^= bb(to);
-                        self.hash ^= unsafe {
-                            ZP[them][p][to]
-                        };
-                        break;
-                    }
-                }
-            }
-        }
-        let mut moved_p: usize = 6;
-        for p in 0..6 {
-            if (self.bb_piece[us][p] & bb(from)) != 0 {
-                moved_p = p;
-                self.bb_piece[us][p] ^= bb(from);
-                self.hash ^= unsafe {
-                    ZP[us][p][from]
-                };
-                break;
-            }
-        }
-        if moved_p == 6 {
-            panic!("no piece on from square");
-        }
-        if moved_p == Piece::P as usize {
-            self.halfmove = 0;
-        }
-        if m.flags & 4 != 0 {
-            if self.stm == Side::White {
-                if to == 6 {
-                    self.bb_piece[us][Piece::R as usize] ^= bb(7) | bb(5);
-                    self.hash ^= unsafe {
-                        ZP[us][Piece::R as usize][7] ^ ZP[us][Piece::R as usize][5]
-                    };
-                } else {
-                    self.bb_piece[us][Piece::R as usize] ^= bb(0) | bb(3);
-                    self.hash ^= unsafe {
-                        ZP[us][Piece::R as usize][0] ^ ZP[us][Piece::R as usize][3]
-                    };
-                }
-            } else {
-                if to == 62 {
-                    self.bb_piece[us][Piece::R as usize] ^= bb(63) | bb(61);
-                    self.hash ^= unsafe {
-                        ZP[us][Piece::R as usize][63] ^ ZP[us][Piece::R as usize][61]
-                    };
-                } else {
-                    self.bb_piece[us][Piece::R as usize] ^= bb(56) | bb(59);
-                    self.hash ^= unsafe {
-                        ZP[us][Piece::R as usize][56] ^ ZP[us][Piece::R as usize][59]
-                    };
-                }
-            }
-        }
-        if m.flags & 8 != 0 {
-            self.hash ^= unsafe {
-                ZEP[self.ep as usize]
-            };
-            self.ep = if self.stm == Side::White {
-                (from + 8) as u8
-            } else {
-                (from - 8) as u8
-            };
-            self.hash ^= unsafe {
-                ZEP[self.ep as usize]
-            };
-        }
-        if m.promo != 255 {
-            let pp = m.promo as usize;
-            self.bb_piece[us][pp] ^= bb(to);
-            self.hash ^= unsafe {
-                ZP[us][pp][to]
-            };
+        let moved = self.piece_at(stm, from).unwrap();
+
+        if moved == PAWN || undo.captured != 255 {
+            self.half_move = 0;
         } else {
-            self.bb_piece[us][moved_p] ^= bb(to);
-            self.hash ^= unsafe {
-                ZP[us][moved_p][to]
-            };
+            self.half_move += 1;
         }
-        let old_castle = self.castling;
-        let mut cr = self.castling;
-        match from {
-            4 => {
-                if us == 0 {
-                    cr &= !(1 | 2);
-                }
-            }
-            60 => {
-                if us == 1 {
-                    cr &= !(4 | 8);
-                }
-            }
-            0 => {
-                cr &= !2;
-            }
-            7 => {
-                cr &= !1;
-            }
-            56 => {
-                cr &= !8;
-            }
-            63 => {
-                cr &= !4;
-            }
-            _ => {}
+        if stm == Side::Black {
+            self.full_move += 1;
         }
-        match to {
-            0 => {
-                cr &= !2;
-            }
-            7 => {
-                cr &= !1;
-            }
-            56 => {
-                cr &= !8;
-            }
-            63 => {
-                cr &= !4;
-            }
-            _ => {}
+
+        if self.ep != 255 {
+            self.hash ^= unsafe { ZOBRIST_EP[(self.ep % 8) as usize] };
         }
-        if cr != old_castle {
-            self.hash ^= unsafe {
-                ZCASTLE[old_castle as usize] ^ ZCASTLE[cr as usize]
-            };
-            self.castling = cr;
+        self.ep = 255;
+
+        self.bb_piece[stm as usize][moved] ^= (1u64 << from) | (1u64 << to);
+        self.bb_side[stm as usize] ^= (1u64 << from) | (1u64 << to);
+        self.hash ^= unsafe { ZOBRIST_PIECE[stm as usize][moved][from] };
+        self.hash ^= unsafe { ZOBRIST_PIECE[stm as usize][moved][to] };
+
+        if undo.captured != 255 {
+            let captured_piece = undo.captured as usize;
+            self.bb_piece[stm.flip() as usize][captured_piece] ^= 1u64 << to;
+            self.bb_side[stm.flip() as usize] ^= 1u64 << to;
+            self.hash ^= unsafe { ZOBRIST_PIECE[stm.flip() as usize][captured_piece][to] };
         }
+
+        if moved == PAWN {
+            if (from as i32 - to as i32).abs() == 16 {
+                self.ep = ((from + to) / 2) as u8;
+                self.hash ^= unsafe { ZOBRIST_EP[(self.ep % 8) as usize] };
+            } else if m.promo != 255 {
+                self.bb_piece[stm as usize][PAWN] ^= 1u64 << to;
+                self.bb_piece[stm as usize][m.promo as usize] |= 1u64 << to;
+                self.hash ^= unsafe { ZOBRIST_PIECE[stm as usize][PAWN][to] };
+                self.hash ^= unsafe { ZOBRIST_PIECE[stm as usize][m.promo as usize][to] };
+            }
+        }
+
+        self.hash ^= unsafe { ZOBRIST_CASTLE[self.castling as usize] };
+        self.castling &= unsafe { CASTLE_MASK[from] & CASTLE_MASK[to] };
+        self.hash ^= unsafe { ZOBRIST_CASTLE[self.castling as usize] };
+
         self.stm = self.stm.flip();
-        self.hash ^= unsafe {
-            ZSTM
-        };
-        self.compute_occ();
-        if self.stm == Side::White {
-            self.fullmove += 1;
-        }
+        self.hash ^= unsafe { ZOBRIST_STM };
     }
 
     pub fn unmake(&mut self) {
-        if let Some(st) = self.hist.pop() {
-            let m = self.move_hist.pop().unwrap();
-            self.castling = st.castling;
-            self.ep = st.ep;
-            self.halfmove = st.halfmove;
-            self.hash = st.hash;
-            self.stm = self.stm.flip();
-            let us = self.stm.idx();
-            let them = self.stm.flip().idx();
+        let undo = self.hist.pop().unwrap();
+        self.stm = self.stm.flip();
 
-            let from = m.from as usize;
-            let to = m.to as usize;
+        self.castling = undo.castling;
+        self.ep = undo.ep;
+        self.half_move = undo.half_move;
+        self.hash = undo.hash;
 
-            if m.promo != 255 {
-                self.bb_piece[us][Piece::P as usize] |= bb(from);
-                self.bb_piece[us][m.promo as usize] &= !bb(to);
-            } else {
-                self.bb_piece[us][m.moved as usize] |= bb(from);
-                self.bb_piece[us][m.moved as usize] &= !bb(to);
+        if self.stm == Side::Black {
+            self.full_move -= 1;
+        }
+
+        let m = undo.m;
+        let from = m.from as usize;
+        let to = m.to as usize;
+        let stm = self.stm;
+
+        let moved = if m.promo == 255 {
+            self.piece_at(stm, to).unwrap()
+        } else {
+            self.bb_piece[stm as usize][m.promo as usize] ^= 1u64 << to;
+            self.bb_piece[stm as usize][PAWN] |= 1u64 << to;
+            PAWN
+        };
+
+        self.bb_piece[stm as usize][moved] ^= (1u64 << from) | (1u64 << to);
+        self.bb_side[stm as usize] ^= (1u64 << from) | (1u64 << to);
+
+        if undo.captured != 255 {
+            let captured_piece = undo.captured as usize;
+            self.bb_piece[stm.flip() as usize][captured_piece] |= 1u64 << to;
+            self.bb_side[stm.flip() as usize] |= 1u64 << to;
+        }
+    }
+
+    pub fn in_check(&self, side: Side) -> bool {
+        let ksq = self.bb_piece[side as usize][KING].trailing_zeros() as usize;
+        self.is_attacked(ksq, side.flip())
+    }
+
+    pub fn is_attacked(&self, sq: usize, by: Side) -> bool {
+        let bb_opp = self.bb_side[by as usize];
+        let bb_own = self.bb_side[by.flip() as usize];
+        let bb_occ = bb_opp | bb_own;
+
+        if by == Side::White {
+            if sq > 7 && (sq % 8 > 0) && self.bb_piece[Side::White as usize][PAWN] & (1u64 << (sq - 9)) != 0 { return true; }
+            if sq > 7 && (sq % 8 < 7) && self.bb_piece[Side::White as usize][PAWN] & (1u64 << (sq - 7)) != 0 { return true; }
+        } else {
+            if sq < 56 && (sq % 8 > 0) && self.bb_piece[Side::Black as usize][PAWN] & (1u64 << (sq + 7)) != 0 { return true; }
+            if sq < 56 && (sq % 8 < 7) && self.bb_piece[Side::Black as usize][PAWN] & (1u64 << (sq + 9)) != 0 { return true; }
+        }
+
+        if unsafe { NATT[sq] } & self.bb_piece[by as usize][KNIGHT] != 0 { return true; }
+        if unsafe { KATT[sq] } & self.bb_piece[by as usize][KING] != 0 { return true; }
+        if bishop_attacks(sq, bb_occ) & (self.bb_piece[by as usize][BISHOP] | self.bb_piece[by as usize][QUEEN]) != 0 { return true; }
+        if rook_attacks(sq, bb_occ) & (self.bb_piece[by as usize][ROOK] | self.bb_piece[by as usize][QUEEN]) != 0 { return true; }
+
+        false
+    }
+
+    pub fn gen_moves(&self, list: &mut Vec<Move>) {
+        let stm = self.stm;
+        let bb_own = self.bb_side[stm as usize];
+        let bb_opp = self.bb_side[stm.flip() as usize];
+        let bb_occ = bb_own | bb_opp;
+
+        let pawns = self.bb_piece[stm as usize][PAWN];
+        if stm == Side::White {
+            let mut fwd = (pawns << 8) & !bb_occ;
+            let mut dbl = ((fwd & 0xFF0000) << 8) & !bb_occ;
+            let mut l = (pawns << 7) & bb_opp & !0x0101010101010101;
+            let mut r = (pawns << 9) & bb_opp & !0x8080808080808080;
+            while fwd > 0 { let to = pop_lsb(&mut fwd); list.push(Move { from: (to - 8) as u8, to: to as u8, promo: 255, flags: 0 }); }
+            while dbl > 0 { let to = pop_lsb(&mut dbl); list.push(Move { from: (to - 16) as u8, to: to as u8, promo: 255, flags: 0 }); }
+            while l > 0 { let to = pop_lsb(&mut l); list.push(Move { from: (to - 7) as u8, to: to as u8, promo: 255, flags: 1 }); }
+            while r > 0 { let to = pop_lsb(&mut r); list.push(Move { from: (to - 9) as u8, to: to as u8, promo: 255, flags: 1 }); }
+        } else {
+            let mut fwd = (pawns >> 8) & !bb_occ;
+            let mut dbl = ((fwd & 0xFF000000000000) >> 8) & !bb_occ;
+            let mut l = (pawns >> 9) & bb_opp & !0x0101010101010101;
+            let mut r = (pawns >> 7) & bb_opp & !0x8080808080808080;
+            while fwd > 0 { let to = pop_lsb(&mut fwd); list.push(Move { from: (to + 8) as u8, to: to as u8, promo: 255, flags: 0 }); }
+            while dbl > 0 { let to = pop_lsb(&mut dbl); list.push(Move { from: (to + 16) as u8, to: to as u8, promo: 255, flags: 0 }); }
+            while l > 0 { let to = pop_lsb(&mut l); list.push(Move { from: (to + 9) as u8, to: to as u8, promo: 255, flags: 1 }); }
+            while r > 0 { let to = pop_lsb(&mut r); list.push(Move { from: (to + 7) as u8, to: to as u8, promo: 255, flags: 1 }); }
+        }
+
+        let knights = self.bb_piece[stm as usize][KNIGHT];
+        for from in Bitscan::new(knights) {
+            let mut attacks = unsafe { NATT[from] };
+            attacks &= !bb_own;
+            for to in Bitscan::new(attacks) {
+                list.push(Move { from: from as u8, to: to as u8, promo: 255, flags: if bb_opp & (1 << to) > 0 { 1 } else { 0 } });
             }
+        }
 
-            if m.flags & 1 != 0 {
-                let cap_sq = if m.flags & 2 != 0 {
-                    if self.stm == Side::White {
-                        to - 8
-                    } else {
-                        to + 8
-                    }
-                } else {
-                    to
+        for p in 2..6 {
+            let mut bbp = self.bb_piece[stm as usize][p];
+            while bbp > 0 {
+                let from = pop_lsb(&mut bbp);
+                let mut attacks = match p {
+                    BISHOP => bishop_attacks(from, bb_occ),
+                    ROOK => rook_attacks(from, bb_occ),
+                    QUEEN => bishop_attacks(from, bb_occ) | rook_attacks(from, bb_occ),
+                    KING => unsafe { KATT[from] },
+                    _ => 0,
                 };
-                self.bb_piece[them][m.captured as usize] |= bb(cap_sq);
-            }
-
-            if m.flags & 4 != 0 {
-                if self.stm == Side::White {
-                    if to == 6 {
-                        self.bb_piece[us][Piece::R as usize] ^= bb(7) | bb(5);
-                    } else {
-                        self.bb_piece[us][Piece::R as usize] ^= bb(0) | bb(3);
-                    }
-                } else {
-                    if to == 62 {
-                        self.bb_piece[us][Piece::R as usize] ^= bb(63) | bb(61);
-                    } else {
-                        self.bb_piece[us][Piece::R as usize] ^= bb(56) | bb(59);
-                    }
+                attacks &= !bb_own;
+                while attacks > 0 {
+                    let to = pop_lsb(&mut attacks);
+                    list.push(Move { from: from as u8, to: to as u8, promo: 255, flags: if bb_opp & (1 << to) > 0 { 1 } else { 0 } });
                 }
             }
-            if self.stm == Side::Black {
-                self.fullmove -= 1;
-            }
-            self.compute_occ();
+        }
+    }
+}
+
+pub fn sq_from_str(s: &str) -> Option<usize> {
+    if s.len() != 2 { return None; }
+    let mut chars = s.chars();
+    let f = chars.next()? as usize - 'a' as usize;
+    let r = chars.next()? as usize - '1' as usize;
+    if f > 7 || r > 7 { return None; }
+    Some(r * 8 + f)
+}
+
+pub fn sq_to_str(sq: usize) -> String {
+    let f = (sq % 8) as u8 + b'a';
+    let r = (sq / 8) as u8 + b'1';
+    format!("{}{}", f as char, r as char)
+}
+
+pub fn move_to_str(m: Move) -> String {
+    let mut s = format!("{}{}", sq_to_str(m.from as usize), sq_to_str(m.to as usize));
+    if m.promo != 255 {
+        s.push(match m.promo {
+            1 => 'n',
+            2 => 'b',
+            3 => 'r',
+            4 => 'q',
+            _ => 'q',
+        })
+    }
+    s
+}
+
+pub fn str_to_move(b: &Board, s: &str) -> Option<Move> {
+    if s.len() < 4 {
+        return None;
+    }
+    let from = sq_from_str(&s[0..2])?;
+    let to = sq_from_str(&s[2..4])?;
+    let promo = if s.len() == 5 {
+        match &s[4..5] {
+            "n" => 1,
+            "b" => 2,
+            "r" => 3,
+            "q" => 4,
+            _ => 4,
+        }
+    } else {
+        255
+    };
+    let mut list = Vec::new();
+    b.gen_moves(&mut list);
+    for m in list {
+        if m.from as usize == from
+            && m.to as usize == to
+            && (m.promo == promo || (m.promo == 255 && promo == 255))
+        {
+            return Some(m);
+        }
+    }
+    None
+}
+
+static mut ZOBRIST_PIECE: [[[u64; 64]; 6]; 2] = [[[0; 64]; 6]; 2];
+static mut ZOBRIST_CASTLE: [u64; 16] = [0; 16];
+static mut ZOBRIST_EP: [u64; 8] = [0; 8];
+static mut ZOBRIST_STM: u64 = 0;
+static mut CASTLE_MASK: [u8; 64] = [0; 64];
+
+pub fn init_zobrist() {
+    let mut rng = XorShift(0xdeadbeefcafebabe);
+    unsafe {
+        for c in 0..2 { for p in 0..6 { for s in 0..64 { ZOBRIST_PIECE[c][p][s] = rng.rand(); } } }
+        for i in 0..16 { ZOBRIST_CASTLE[i] = rng.rand(); }
+        for i in 0..8 { ZOBRIST_EP[i] = rng.rand(); }
+        ZOBRIST_STM = rng.rand();
+
+        for i in 0..64 { CASTLE_MASK[i] = 15; }
+        CASTLE_MASK[0] &= 13; CASTLE_MASK[4] &= 12; CASTLE_MASK[7] &= 14;
+        CASTLE_MASK[56] &= 7; CASTLE_MASK[60] &= 3; CASTLE_MASK[63] &= 11;
+    }
+}
+
+static mut NATT: [u64; 64] = [0; 64];
+static mut KATT: [u64; 64] = [0; 64];
+
+pub fn init_tables() {
+    for sq in 0..64 {
+        unsafe {
+            NATT[sq] = 1u64.wrapping_shl(17).wrapping_shr(sq as u32) | 1u64.wrapping_shl(15).wrapping_shr(sq as u32) | 1u64.wrapping_shl(10).wrapping_shr(sq as u32) | 1u64.wrapping_shl(6).wrapping_shr(sq as u32);
+            KATT[sq] = 1u64.wrapping_shl(9).wrapping_shr(sq as u32) | 1u64.wrapping_shl(8).wrapping_shr(sq as u32) | 1u64.wrapping_shl(7).wrapping_shr(sq as u32) | 1u64.wrapping_shl(1).wrapping_shr(sq as u32) | 1u64.wrapping_shl(1).wrapping_shl(sq as u32) | 1u64.wrapping_shl(7).wrapping_shl(sq as u32) | 1u64.wrapping_shl(8).wrapping_shl(sq as u32) | 1u64.wrapping_shl(9).wrapping_shl(sq as u32);
+        }
+    }
+}
+
+fn bishop_attacks(sq: usize, occ: u64) -> u64 {
+    let mut attacks = 0;
+    let r = sq / 8;
+    let f = sq % 8;
+
+    for i in 1.. {
+        if r + i > 7 || f + i > 7 { break; }
+        let to = (r + i) * 8 + (f + i);
+        attacks |= 1 << to;
+        if occ & (1 << to) > 0 { break; }
+    }
+    for i in 1.. {
+        if r + i > 7 || f < i { break; }
+        let to = (r + i) * 8 + (f - i);
+        attacks |= 1 << to;
+        if occ & (1 << to) > 0 { break; }
+    }
+    for i in 1.. {
+        if r < i || f + i > 7 { break; }
+        let to = (r - i) * 8 + (f + i);
+        attacks |= 1 << to;
+        if occ & (1 << to) > 0 { break; }
+    }
+    for i in 1.. {
+        if r < i || f < i { break; }
+        let to = (r - i) * 8 + (f - i);
+        attacks |= 1 << to;
+        if occ & (1 << to) > 0 { break; }
+    }
+    attacks
+}
+
+fn rook_attacks(sq: usize, occ: u64) -> u64 {
+    let mut attacks = 0;
+    let r = sq / 8;
+    let f = sq % 8;
+
+    for i in 1.. {
+        if r + i > 7 { break; }
+        let to = (r + i) * 8 + f;
+        attacks |= 1 << to;
+        if occ & (1 << to) > 0 { break; }
+    }
+    for i in 1.. {
+        if r < i { break; }
+        let to = (r - i) * 8 + f;
+        attacks |= 1 << to;
+        if occ & (1 << to) > 0 { break; }
+    }
+    for i in 1.. {
+        if f + i > 7 { break; }
+        let to = r * 8 + (f + i);
+        attacks |= 1 << to;
+        if occ & (1 << to) > 0 { break; }
+    }
+    for i in 1.. {
+        if f < i { break; }
+        let to = r * 8 + (f - i);
+        attacks |= 1 << to;
+        if occ & (1 << to) > 0 { break; }
+    }
+    attacks
+}
+
+#[inline]
+pub fn pop_lsb(b: &mut u64) -> usize {
+    let s = b.trailing_zeros() as usize;
+    *b &= *b - 1;
+    s
+}
+
+struct XorShift(u64);
+impl XorShift { fn rand(&mut self) -> u64 { self.0 ^= self.0 << 13; self.0 ^= self.0 >> 7; self.0 ^= self.0 << 17; self.0 } }
+
+pub struct Bitscan {
+    bb: u64,
+}
+
+impl Bitscan {
+    pub fn new(bb: u64) -> Self {
+        Self { bb }
+    }
+}
+
+impl Iterator for Bitscan {
+    type Item = usize;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.bb == 0 {
+            None
+        } else {
+            Some(pop_lsb(&mut self.bb))
         }
     }
 }
