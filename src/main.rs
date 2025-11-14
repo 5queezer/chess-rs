@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use rand::Rng;
 
 mod board;
 mod perft;
@@ -125,6 +126,7 @@ struct Searcher {
     tt: Arc<Mutex<HashMap<u64, TTEntry>>>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    difficulty: Arc<Mutex<u8>>, // 1=Beginner, 2=Easy, 3=Medium, 4=Hard, 5=Expert
 }
 
 impl Searcher {
@@ -133,6 +135,7 @@ impl Searcher {
             tt: Arc::new(Mutex::new(HashMap::new())),
             stop: Arc::new(AtomicBool::new(false)),
             handle: None,
+            difficulty: Arc::new(Mutex::new(5)), // Default to Expert level
         }
     }
 }
@@ -194,7 +197,53 @@ impl SearchInstance {
                 break;
             }
         }
+
+        // Apply randomization for lower difficulty levels
+        let difficulty = *self.searcher.difficulty.lock().unwrap();
+        if difficulty < 3 && best.is_some() {
+            best = self.maybe_randomize_move(b, best, difficulty);
+        }
+
         (score, best)
+    }
+
+    fn maybe_randomize_move(&mut self, b: &mut Board, best: Option<Move>, difficulty: u8) -> Option<Move> {
+        let mut rng = rand::thread_rng();
+
+        // Determine randomization probability and pool size based on difficulty
+        let (rand_prob, pool_size) = match difficulty {
+            1 => (40, 5),  // Beginner: 40% chance, pick from top 5
+            2 => (20, 3),  // Easy: 20% chance, pick from top 3
+            _ => return best, // No randomization for medium and above
+        };
+
+        // Roll the dice
+        if rng.gen_range(0..100) >= rand_prob {
+            return best; // No randomization this time
+        }
+
+        // Generate and score all legal moves
+        let mut moves = Vec::with_capacity(64);
+        b.gen_moves(&mut moves);
+
+        // Filter to legal moves only
+        let mut legal_moves = Vec::new();
+        for m in moves {
+            b.make_move(m);
+            if !b.in_check(b.stm.flip()) {
+                legal_moves.push(m);
+            }
+            b.unmake();
+        }
+
+        if legal_moves.is_empty() {
+            return best;
+        }
+
+        // Pick a random move from the pool
+        let pick_from = pool_size.min(legal_moves.len());
+        let idx = rng.gen_range(0..pick_from);
+        Some(legal_moves[idx])
     }
     fn timed_out(&self) -> bool {
         self.start.elapsed() >= self.time_limit
@@ -549,6 +598,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
     if line == "uci" {
         println!("id name rce");
         println!("id author openai");
+        println!("option name Skill Level type spin default 5 min 1 max 5");
         println!("uciok");
         return;
     }
@@ -570,6 +620,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         return;
     }
     if line.starts_with("setoption") {
+        handle_setoption(line, s);
         return;
     }
     if line.starts_with("position ") {
@@ -578,11 +629,13 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
     }
     if line.starts_with("go") {
         let params = parse_go(line);
-        let depth = params.depth.unwrap_or(100);
+        let difficulty = *s.difficulty.lock().unwrap();
+        let depth = get_depth_for_difficulty(difficulty, params.depth);
         let time_ms = time_for_move(b.stm, &params);
         let mut b2 = b.clone();
         let tt = s.tt.clone();
         let stop = s.stop.clone();
+        let diff = s.difficulty.clone();
         s.handle = Some(std::thread::spawn(move || {
             stop.store(false, Ordering::Relaxed);
             let mut si = SearchInstance {
@@ -590,6 +643,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                     tt,
                     stop,
                     handle: None,
+                    difficulty: diff,
                 },
                 nodes: 0,
                 start: Instant::now(),
@@ -636,10 +690,12 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         return;
     }
     if line.starts_with("go") || line == "go" {
-        let depth = 6;
+        let difficulty = *s.difficulty.lock().unwrap();
+        let depth = get_depth_for_difficulty(difficulty, None);
         let mut b2 = b.clone();
         let tt = s.tt.clone();
         let stop = s.stop.clone();
+        let diff = s.difficulty.clone();
         s.handle = Some(std::thread::spawn(move || {
             stop.store(false, Ordering::Relaxed);
             let mut si = SearchInstance {
@@ -647,6 +703,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                     tt,
                     stop,
                     handle: None,
+                    difficulty: diff,
                 },
                 nodes: 0,
                 start: Instant::now(),
@@ -666,10 +723,12 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         return;
     }
     if line.starts_with("hint") {
-        let depth = 4;
+        let difficulty = *s.difficulty.lock().unwrap();
+        let depth = get_depth_for_difficulty(difficulty, Some(4));
         let mut b2 = b.clone();
         let tt = s.tt.clone();
         let stop = s.stop.clone();
+        let diff = s.difficulty.clone();
         s.handle = Some(std::thread::spawn(move || {
             stop.store(false, Ordering::Relaxed);
             let mut si = SearchInstance {
@@ -677,6 +736,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                     tt,
                     stop,
                     handle: None,
+                    difficulty: diff,
                 },
                 nodes: 0,
                 start: Instant::now(),
@@ -724,6 +784,50 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
 
     if line == "quit" {
         return;
+    }
+}
+
+fn handle_setoption(cmd: &str, s: &mut Searcher) {
+    // Parse: setoption name <name> value <value>
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    let mut name_idx = None;
+    let mut value_idx = None;
+
+    for (i, &part) in parts.iter().enumerate() {
+        if part == "name" && i + 1 < parts.len() {
+            name_idx = Some(i + 1);
+        }
+        if part == "value" && i + 1 < parts.len() {
+            value_idx = Some(i + 1);
+        }
+    }
+
+    if let (Some(n_idx), Some(v_idx)) = (name_idx, value_idx) {
+        let name = parts[n_idx..v_idx.min(parts.len()).saturating_sub(1)].join(" ").to_lowercase();
+
+        if name.contains("skill") || name.contains("difficulty") {
+            if let Ok(level) = parts[v_idx].parse::<u8>() {
+                let clamped = level.clamp(1, 5);
+                *s.difficulty.lock().unwrap() = clamped;
+                println!("info string Difficulty level set to {}", clamped);
+            }
+        }
+    }
+}
+
+fn get_depth_for_difficulty(difficulty: u8, requested_depth: Option<i32>) -> i32 {
+    // If depth is explicitly requested, respect it for Expert level only
+    if difficulty == 5 {
+        return requested_depth.unwrap_or(100);
+    }
+
+    // Otherwise use difficulty-based depth
+    match difficulty {
+        1 => 2,  // Beginner
+        2 => 3,  // Easy
+        3 => 5,  // Medium
+        4 => 7,  // Hard
+        _ => requested_depth.unwrap_or(100), // Expert (default)
     }
 }
 
