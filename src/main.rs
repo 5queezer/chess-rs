@@ -8,8 +8,10 @@ use rand::Rng;
 
 mod board;
 mod perft;
+mod ml;
 
 use board::*;
+use ml::{MLEvaluator, MLConfig};
 
 const MVAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
 static PST_W: [[i32; 64]; 6] = [
@@ -79,7 +81,8 @@ const ADJACENT_FILES: [u64; 8] = [
     FILE_MASKS[6],
 ];
 
-fn eval(b: &Board) -> i32 {
+/// Classical hand-crafted evaluation function
+fn eval_classical(b: &Board) -> i32 {
     let mut s = 0;
     for c in 0..2 {
         for p in 0..6 {
@@ -109,6 +112,11 @@ fn eval(b: &Board) -> i32 {
     s += pawn_structure_penalty(black_pawns);
     s
 }
+
+/// Backward compatibility wrapper
+fn eval(b: &Board) -> i32 {
+    eval_classical(b)
+}
 #[inline]
 fn pst_val(p: usize, sq: usize) -> i32 {
     PST_W[p][sq]
@@ -127,15 +135,32 @@ struct Searcher {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     difficulty: Arc<Mutex<u8>>, // 1=Beginner, 2=Easy, 3=Medium, 4=Hard, 5=Expert
+    ml_evaluator: Arc<Mutex<Option<MLEvaluator>>>,
+    use_ml: Arc<Mutex<bool>>,
 }
 
 impl Searcher {
     fn new() -> Self {
+        // Try to initialize ML evaluator
+        let ml_eval = match MLEvaluator::new() {
+            Ok(evaluator) => {
+                evaluator.print_status();
+                Some(evaluator)
+            }
+            Err(e) => {
+                eprintln!("⚠️  ML initialization failed: {}", e);
+                eprintln!("   Using classical evaluation only");
+                None
+            }
+        };
+
         Self {
             tt: Arc::new(Mutex::new(HashMap::new())),
             stop: Arc::new(AtomicBool::new(false)),
             handle: None,
             difficulty: Arc::new(Mutex::new(5)), // Default to Expert level
+            ml_evaluator: Arc::new(Mutex::new(ml_eval)),
+            use_ml: Arc::new(Mutex::new(true)), // ML enabled by default
         }
     }
 }
@@ -150,6 +175,27 @@ struct SearchInstance {
 }
 
 impl SearchInstance {
+    /// Evaluate a position using ML (if enabled and available) or classical evaluation
+    fn eval(&self, b: &Board) -> i32 {
+        // Check if ML evaluation is enabled
+        let use_ml = *self.searcher.use_ml.lock().unwrap();
+
+        if use_ml {
+            // Try ML evaluation
+            if let Some(ref ml_eval) = *self.searcher.ml_evaluator.lock().unwrap() {
+                match ml_eval.evaluate(b) {
+                    Ok(score) => return score,
+                    Err(_) => {
+                        // Fall through to classical evaluation
+                    }
+                }
+            }
+        }
+
+        // Fallback to classical evaluation
+        eval_classical(b)
+    }
+
     fn search(&mut self, b: &mut Board, depth: i32) -> (i32, Option<Move>) {
         let mut best = None;
         let mut score = 0;
@@ -278,7 +324,7 @@ impl SearchInstance {
         if depth <= 0 {
             return (self.qsearch(b, alpha, beta), None);
         }
-        let static_eval = eval(b);
+        let static_eval = self.eval(b);
         let mut pv_move = None;
         if let Some(tt) = self.probe(b.hash) {
             if tt.depth >= depth {
@@ -430,7 +476,7 @@ impl SearchInstance {
             self.searcher.stop.store(true, Ordering::Relaxed);
             return 0;
         }
-        let stand = eval(b);
+        let stand = self.eval(b);
         if stand >= beta {
             return beta;
         }
@@ -596,9 +642,17 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
 
     // UCI protocol
     if line == "uci" {
-        println!("id name rce");
-        println!("id author openai");
+        println!("id name rce-ml");
+        println!("id author openai + neural network");
         println!("option name Skill Level type spin default 5 min 1 max 5");
+        println!("option name Use ML Evaluation type check default true");
+        println!("option name ML Model Path type string default <empty>");
+
+        // Print ML status
+        if let Some(ref ml_eval) = *s.ml_evaluator.lock().unwrap() {
+            eprintln!("# ML Status: {}", ml_eval.device_info());
+        }
+
         println!("uciok");
         return;
     }
@@ -636,6 +690,8 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         let tt = s.tt.clone();
         let stop = s.stop.clone();
         let diff = s.difficulty.clone();
+        let ml_eval = s.ml_evaluator.clone();
+        let use_ml = s.use_ml.clone();
         s.handle = Some(std::thread::spawn(move || {
             stop.store(false, Ordering::Relaxed);
             let mut si = SearchInstance {
@@ -644,6 +700,8 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                     stop,
                     handle: None,
                     difficulty: diff,
+                    ml_evaluator: ml_eval,
+                    use_ml,
                 },
                 nodes: 0,
                 start: Instant::now(),
@@ -696,6 +754,8 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         let tt = s.tt.clone();
         let stop = s.stop.clone();
         let diff = s.difficulty.clone();
+        let ml_eval = s.ml_evaluator.clone();
+        let use_ml = s.use_ml.clone();
         s.handle = Some(std::thread::spawn(move || {
             stop.store(false, Ordering::Relaxed);
             let mut si = SearchInstance {
@@ -704,6 +764,8 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                     stop,
                     handle: None,
                     difficulty: diff,
+                    ml_evaluator: ml_eval,
+                    use_ml,
                 },
                 nodes: 0,
                 start: Instant::now(),
@@ -729,6 +791,8 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         let tt = s.tt.clone();
         let stop = s.stop.clone();
         let diff = s.difficulty.clone();
+        let ml_eval = s.ml_evaluator.clone();
+        let use_ml = s.use_ml.clone();
         s.handle = Some(std::thread::spawn(move || {
             stop.store(false, Ordering::Relaxed);
             let mut si = SearchInstance {
@@ -737,6 +801,8 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                     stop,
                     handle: None,
                     difficulty: diff,
+                    ml_evaluator: ml_eval,
+                    use_ml,
                 },
                 nodes: 0,
                 start: Instant::now(),
@@ -810,6 +876,20 @@ fn handle_setoption(cmd: &str, s: &mut Searcher) {
                 let clamped = level.clamp(1, 5);
                 *s.difficulty.lock().unwrap() = clamped;
                 println!("info string Difficulty level set to {}", clamped);
+            }
+        } else if name.contains("use ml") || name.contains("useml") {
+            // Handle "Use ML Evaluation" option
+            let value_str = parts[v_idx].to_lowercase();
+            let enabled = value_str == "true" || value_str == "1";
+            *s.use_ml.lock().unwrap() = enabled;
+            println!("info string ML evaluation {}", if enabled { "enabled" } else { "disabled" });
+        } else if name.contains("ml model") || name.contains("mlmodel") {
+            // Handle "ML Model Path" option
+            let path = parts[v_idx..].join(" ");
+            if path != "<empty>" && !path.is_empty() {
+                println!("info string Loading ML model from: {}", path);
+                // TODO: Implement model loading
+                // For now, just acknowledge the path
             }
         }
     }

@@ -851,3 +851,49 @@ impl Iterator for Bitscan {
         }
     }
 }
+
+// Helper methods for ML encoder
+impl Board {
+    /// Get side to move as usize (0=White, 1=Black)
+    pub fn side(&self) -> usize {
+        self.stm as usize
+    }
+
+    /// Get piece bitboard for a specific side and piece type
+    pub fn piece_bitboard(&self, side: usize, piece: usize) -> u64 {
+        self.bb_piece[side][piece]
+    }
+
+    /// Check if side can castle kingside
+    pub fn can_castle_kingside(&self, side: usize) -> bool {
+        if side == 0 {
+            self.castling & 1 != 0  // White kingside
+        } else {
+            self.castling & 4 != 0  // Black kingside
+        }
+    }
+
+    /// Check if side can castle queenside
+    pub fn can_castle_queenside(&self, side: usize) -> bool {
+        if side == 0 {
+            self.castling & 2 != 0  // White queenside
+        } else {
+            self.castling & 8 != 0  // Black queenside
+        }
+    }
+
+    /// Check if en passant is available
+    pub fn has_en_passant(&self) -> bool {
+        self.ep != 255
+    }
+
+    /// Get halfmove clock
+    pub fn halfmove_clock(&self) -> u8 {
+        self.half_move
+    }
+
+    /// Create a new board (alias for startpos)
+    pub fn new() -> Self {
+        Self::startpos()
+    }
+}
