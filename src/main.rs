@@ -221,9 +221,17 @@ impl SearchInstance {
     }
 
     fn search(&mut self, b: &mut Board, depth: i32) -> (i32, Option<Move>) {
+        // Check if position is drawn before searching
+        if b.is_draw() {
+            // Position is drawn by rule - return draw score and no move
+            return (0, None);
+        }
+
         let mut best = None;
         let mut score = 0;
         let mut prev_score = 0;
+        let mut hopeless_start: Option<Instant> = None;
+
         'iter: for d in 1..=depth {
             if self.timed_out() {
                 break;
@@ -272,6 +280,25 @@ impl SearchInstance {
                         println!("{} {} {} {} {}", d, sc, elapsed_cs, self.nodes, move_to_str(m));
                     }
                 }
+
+                // Check for hopeless position (very negative eval for extended time)
+                // If eval is very bad (worse than -500 cp = -5 pawns), track how long
+                if sc < -500 {
+                    if hopeless_start.is_none() {
+                        hopeless_start = Some(Instant::now());
+                    } else if let Some(start) = hopeless_start {
+                        // If position has been hopeless for > 60 seconds, offer draw
+                        if start.elapsed() >= Duration::from_secs(60) {
+                            println!("info string Position is hopeless, offering draw");
+                            println!("offer draw");
+                            break 'iter;
+                        }
+                    }
+                } else {
+                    // Position improved, reset hopeless timer
+                    hopeless_start = None;
+                }
+
                 break;
             }
         }
@@ -347,6 +374,12 @@ impl SearchInstance {
             return (0, None);
         }
         self.nodes += 1;
+
+        // Check for draw by rule (only after root to allow finding draw)
+        if ply > 0 && b.is_draw() {
+            return (0, None);
+        }
+
         let stm = b.stm;
         let mut depth = depth;
         let in_check = b.in_check(b.stm);
@@ -1176,12 +1209,6 @@ fn handle_setoption(cmd: &str, s: &mut Searcher) {
 }
 
 fn get_depth_for_difficulty(difficulty: u8, requested_depth: Option<i32>, use_ml: bool, time_ms: u64) -> i32 {
-    // If depth is explicitly requested (e.g., "go depth 20"), honor it exactly
-    // Only apply adaptive limits when depth is not specified
-    if let Some(depth) = requested_depth {
-        return depth;
-    }
-
     // Calculate adaptive max depth based on time and ML usage
     let adaptive_max_depth = if use_ml {
         // ML is very slow, limit depth based on time
@@ -1209,16 +1236,20 @@ fn get_depth_for_difficulty(difficulty: u8, requested_depth: Option<i32>, use_ml
         }
     };
 
-    // Use difficulty-based depth, capped at adaptive max
-    let difficulty_depth = match difficulty {
-        1 => 2,  // Beginner
-        2 => 3,  // Easy
-        3 => 5,  // Medium
-        4 => 7,  // Hard
-        _ => adaptive_max_depth, // Expert: use adaptive max
+    // Define max depth for each difficulty level
+    let difficulty_max_depth = match difficulty {
+        1 => 2,   // Beginner: very shallow
+        2 => 4,   // Easy: shallow
+        3 => 8,   // Medium: moderate
+        4 => 12,  // Hard: deep
+        _ => 100, // Expert: no artificial limit (only time-based)
     };
 
-    difficulty_depth.min(adaptive_max_depth)
+    // Use the requested depth if provided, but cap it based on difficulty and adaptive limits
+    let base_depth = requested_depth.unwrap_or(adaptive_max_depth);
+
+    // Apply both difficulty cap and adaptive cap
+    base_depth.min(difficulty_max_depth).min(adaptive_max_depth)
 }
 
 fn time_for_move(stm: Side, params: &GoParams, use_ml: bool) -> u64 {

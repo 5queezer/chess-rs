@@ -886,4 +886,94 @@ impl Board {
     pub fn new() -> Self {
         Self::startpos()
     }
+
+    /// Check if the position is drawn by insufficient material
+    pub fn is_insufficient_material(&self) -> bool {
+        // Count total material for both sides
+        let white = Side::White as usize;
+        let black = Side::Black as usize;
+
+        // If there are any pawns, rooks, or queens, not insufficient material
+        if self.bb_piece[white][PAWN] != 0 || self.bb_piece[black][PAWN] != 0 {
+            return false;
+        }
+        if self.bb_piece[white][ROOK] != 0 || self.bb_piece[black][ROOK] != 0 {
+            return false;
+        }
+        if self.bb_piece[white][QUEEN] != 0 || self.bb_piece[black][QUEEN] != 0 {
+            return false;
+        }
+
+        // Count minor pieces
+        let white_knights = self.bb_piece[white][KNIGHT].count_ones();
+        let white_bishops = self.bb_piece[white][BISHOP].count_ones();
+        let black_knights = self.bb_piece[black][KNIGHT].count_ones();
+        let black_bishops = self.bb_piece[black][BISHOP].count_ones();
+
+        let white_minors = white_knights + white_bishops;
+        let black_minors = black_knights + black_bishops;
+
+        // King vs King
+        if white_minors == 0 && black_minors == 0 {
+            return true;
+        }
+
+        // King + minor vs King
+        if (white_minors == 1 && black_minors == 0) || (white_minors == 0 && black_minors == 1) {
+            return true;
+        }
+
+        // King + Bishop vs King + Bishop (same color bishops)
+        if white_knights == 0 && black_knights == 0 && white_bishops == 1 && black_bishops == 1 {
+            // Check if bishops are on the same color square
+            let white_bishop_sq = self.bb_piece[white][BISHOP].trailing_zeros() as usize;
+            let black_bishop_sq = self.bb_piece[black][BISHOP].trailing_zeros() as usize;
+
+            // Square color is (rank + file) % 2
+            let white_color = (white_bishop_sq / 8 + white_bishop_sq % 8) % 2;
+            let black_color = (black_bishop_sq / 8 + black_bishop_sq % 8) % 2;
+
+            if white_color == black_color {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check if the position is drawn by the fifty-move rule
+    pub fn is_fifty_move_draw(&self) -> bool {
+        self.half_move >= 100
+    }
+
+    /// Check if the position is drawn by three-fold repetition
+    pub fn is_repetition_draw(&self) -> bool {
+        let mut count = 1; // Current position counts as one
+
+        // Look back through history for positions with the same hash
+        // We only need to check positions since the last pawn move or capture
+        // (half_move counter tells us how far back that is)
+        let lookback = (self.half_move as usize).min(self.hist.len());
+
+        for i in (0..lookback).step_by(2) {
+            if self.hist.len() >= i + 1 {
+                let idx = self.hist.len() - 1 - i;
+                if self.hist[idx].hash == self.hash {
+                    count += 1;
+                    if count >= 3 {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Check if the current position is drawn by any rule
+    pub fn is_draw(&self) -> bool {
+        self.is_insufficient_material()
+            || self.is_fifty_move_draw()
+            || self.is_repetition_draw()
+    }
 }
