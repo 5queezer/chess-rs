@@ -73,12 +73,7 @@ pub struct Board {
 
 impl Board {
     pub fn piece_at(&self, side: Side, sq: usize) -> Option<usize> {
-        for p in 0..6 {
-            if self.bb_piece[side as usize][p] & (1u64 << sq) != 0 {
-                return Some(p);
-            }
-        }
-        None
+        (0..6).find(|&p| self.bb_piece[side as usize][p] & (1u64 << sq) != 0)
     }
 
     pub fn startpos() -> Self {
@@ -390,7 +385,7 @@ impl Board {
 
         if by == Side::White {
             if sq >= 9
-                && (sq % 8 > 0)
+                && !sq.is_multiple_of(8)
                 && self.bb_piece[Side::White as usize][PAWN] & (1u64 << (sq - 9)) != 0
             {
                 return true;
@@ -403,7 +398,7 @@ impl Board {
             }
         } else {
             if sq < 56
-                && (sq % 8 > 0)
+                && !sq.is_multiple_of(8)
                 && self.bb_piece[Side::Black as usize][PAWN] & (1u64 << (sq + 7)) != 0
             {
                 return true;
@@ -678,15 +673,9 @@ pub fn str_to_move(b: &Board, s: &str) -> Option<Move> {
     };
     let mut list = Vec::new();
     b.gen_moves(&mut list);
-    for m in list {
-        if m.from as usize == from
+    list.into_iter().find(|&m| m.from as usize == from
             && m.to as usize == to
-            && (m.promo == promo || (m.promo == 255 && promo == 255))
-        {
-            return Some(m);
-        }
-    }
-    None
+            && (m.promo == promo || (m.promo == 255 && promo == 255)))
 }
 
 static mut ZOBRIST_PIECE: [[[u64; 64]; 6]; 2] = [[[0; 64]; 6]; 2];
@@ -893,6 +882,7 @@ impl Board {
     }
 
     /// Create a new board (alias for startpos)
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::startpos()
     }

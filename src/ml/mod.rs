@@ -9,4 +9,7 @@ pub mod evaluator;
 pub use device::{DeviceManager, DevicePreference};
 pub use encoder::BoardEncoder;
 pub use network::ChessNet;
-pub use evaluator::{MLEvaluator, MLConfig};
+pub use evaluator::MLEvaluator;
+
+#[allow(unused_imports)]
+pub use evaluator::MLConfig;

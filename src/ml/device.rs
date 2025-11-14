@@ -5,6 +5,7 @@ use candle_core::{Device, Result};
 
 /// Device selection configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum DevicePreference {
     /// Automatically select best available device
     Auto,
@@ -23,6 +24,7 @@ pub struct DeviceManager {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum DeviceType {
     Cpu,
     Cuda(usize),  // GPU index
@@ -90,6 +92,7 @@ impl DeviceManager {
     }
 
     /// Get the device type
+    #[allow(dead_code)]
     pub fn device_type(&self) -> DeviceType {
         self.device_type
     }
@@ -116,6 +119,7 @@ impl DeviceManager {
     }
 
     /// Print device capabilities
+    #[allow(dead_code)]
     pub fn print_capabilities(&self) {
         eprintln!("\n╔═══════════════════════════════════════╗");
         eprintln!("║     ML Engine Device Information      ║");
@@ -151,12 +155,14 @@ impl Default for DeviceManager {
 }
 
 /// Helper function to get the best available device
+#[allow(dead_code)]
 pub fn get_best_device() -> Result<Device> {
     let manager = DeviceManager::new()?;
     Ok(manager.device)
 }
 
 /// Check if CUDA is available
+#[allow(dead_code)]
 pub fn is_cuda_available() -> bool {
     #[cfg(feature = "cuda")]
     {
@@ -169,6 +175,7 @@ pub fn is_cuda_available() -> bool {
 }
 
 /// Check if Metal is available
+#[allow(dead_code)]
 pub fn is_metal_available() -> bool {
     #[cfg(feature = "metal")]
     {
@@ -181,9 +188,10 @@ pub fn is_metal_available() -> bool {
 }
 
 /// Get device capabilities as a string
+#[allow(dead_code)]
 pub fn get_device_capabilities() -> String {
     #[allow(unused_mut)]
-    let mut caps = vec!["CPU"];
+    let mut caps = ["CPU"];
 
     #[cfg(feature = "cuda")]
     if is_cuda_available() {

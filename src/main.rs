@@ -11,7 +11,7 @@ mod perft;
 mod ml;
 
 use board::*;
-use ml::{MLEvaluator, MLConfig};
+use ml::MLEvaluator;
 
 const MVAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
 static PST_W: [[i32; 64]; 6] = [
@@ -113,10 +113,6 @@ fn eval_classical(b: &Board) -> i32 {
     s
 }
 
-/// Backward compatibility wrapper
-fn eval(b: &Board) -> i32 {
-    eval_classical(b)
-}
 #[inline]
 fn pst_val(p: usize, sq: usize) -> i32 {
     PST_W[p][sq]
@@ -548,12 +544,11 @@ fn move_score(
     stm: Side,
     history: &HistoryTable,
 ) -> i32 {
-    if let Some(pv) = pv_move {
-        if pv == *m {
+    if let Some(pv) = pv_move
+        && pv == *m {
             return 1_000_000;
         }
-    }
-    if killers.iter().any(|&k| k == Some(*m)) {
+    if killers.contains(&Some(*m)) {
         return 900_000;
     }
     if (m.flags & FLAG_CAPTURE) != 0 {
@@ -609,11 +604,10 @@ fn pawn_structure_penalty(pawns: u64) -> i32 {
         if count > 1 {
             penalty += DOUBLED_PAWN_PENALTY * (count - 1);
         }
-        if count > 0 {
-            if (pawns & ADJACENT_FILES[file]) == 0 {
+        if count > 0
+            && (pawns & ADJACENT_FILES[file]) == 0 {
                 penalty += ISOLATED_PAWN_PENALTY;
             }
-        }
     }
     penalty
 }
@@ -833,23 +827,22 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         return;
     }
     if line == "remove" {
-        if b.hist.len() > 0 {
+        if !b.hist.is_empty() {
             b.unmake();
         }
-        if b.hist.len() > 0 {
+        if !b.hist.is_empty() {
             b.unmake();
         }
         return;
     }
     if line == "undo" {
-        if b.hist.len() > 0 {
+        if !b.hist.is_empty() {
             b.unmake();
         }
         return;
     }
 
     if line == "quit" {
-        return;
     }
 }
 

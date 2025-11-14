@@ -180,7 +180,7 @@ impl ChessNet {
         let mut res_blocks = Vec::with_capacity(NUM_RESIDUAL_BLOCKS);
         for i in 0..NUM_RESIDUAL_BLOCKS {
             res_blocks.push(ResidualBlock::new(
-                vb.pp(&format!("res_block_{}", i)),
+                vb.pp(format!("res_block_{}", i)),
                 NUM_FILTERS,
             )?);
         }
@@ -223,6 +223,7 @@ impl ChessNet {
 
     /// Evaluate a single position
     /// Returns (value_score, policy_logits)
+    #[allow(dead_code)]
     pub fn evaluate_position(&self, input: &Tensor) -> Result<(f32, Vec<f32>)> {
         let (value, policy) = self.forward(input)?;
 
