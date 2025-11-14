@@ -133,6 +133,17 @@ struct Searcher {
     difficulty: Arc<Mutex<u8>>, // 1=Beginner, 2=Easy, 3=Medium, 4=Hard, 5=Expert
     ml_evaluator: Arc<Mutex<Option<MLEvaluator>>>,
     use_ml: Arc<Mutex<bool>>,
+    // XBoard protocol state
+    force_mode: bool,
+    post_mode: bool,
+    engine_color: Option<Side>,
+    xboard_time: i32,        // Engine's remaining time in centiseconds
+    xboard_otim: i32,        // Opponent's time in centiseconds
+    time_per_move: Option<i32>, // Fixed time per move in centiseconds (st command)
+    depth_limit: Option<i32>,   // Fixed depth limit (sd command)
+    level_moves: i32,        // Moves per time control (0 = game in X)
+    level_base: i32,         // Base time in centiseconds
+    level_inc: i32,          // Increment in centiseconds
 }
 
 impl Searcher {
@@ -157,6 +168,17 @@ impl Searcher {
             difficulty: Arc::new(Mutex::new(5)), // Default to Expert level
             ml_evaluator: Arc::new(Mutex::new(ml_eval)),
             use_ml: Arc::new(Mutex::new(true)), // ML enabled by default
+            // XBoard defaults
+            force_mode: false,
+            post_mode: false,
+            engine_color: None,
+            xboard_time: 30000,      // 5 minutes default
+            xboard_otim: 30000,
+            time_per_move: None,
+            depth_limit: None,
+            level_moves: 0,          // 0 = game in X
+            level_base: 30000,       // 5 minutes in centiseconds
+            level_inc: 0,
         }
     }
 }
@@ -236,6 +258,14 @@ impl SearchInstance {
                     best = bm;
                 }
                 prev_score = sc;
+
+                // Output thinking in post mode (XBoard protocol)
+                if self.searcher.post_mode {
+                    let elapsed_cs = self.start.elapsed().as_millis() as i32 / 10;
+                    if let Some(m) = best {
+                        println!("{} {} {} {} {}", d, sc, elapsed_cs, self.nodes, move_to_str(m));
+                    }
+                }
                 break;
             }
         }
@@ -628,6 +658,20 @@ fn main() {
     }
 }
 
+/// Calculate time allocation for XBoard mode based on current time controls
+fn calculate_xboard_time(s: &Searcher, _b: &Board) -> i32 {
+    // If fixed time per move is set, use that
+    if let Some(time_per_move) = s.time_per_move {
+        return time_per_move;
+    }
+
+    // Calculate time based on remaining time
+    // Use a simple allocation: 1/40th of remaining time + increment
+    // This is a conservative allocation suitable for most time controls
+    let base_time = s.xboard_time / 40;
+    base_time + s.level_inc
+}
+
 fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bool) {
     let line = line.trim();
     if line.is_empty() {
@@ -696,6 +740,16 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                     difficulty: diff,
                     ml_evaluator: ml_eval,
                     use_ml,
+                    force_mode: false,
+                    post_mode: false,
+                    engine_color: None,
+                    xboard_time: 0,
+                    xboard_otim: 0,
+                    time_per_move: None,
+                    depth_limit: None,
+                    level_moves: 0,
+                    level_base: 0,
+                    level_inc: 0,
                 },
                 nodes: 0,
                 start: Instant::now(),
@@ -728,13 +782,23 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         *xboard_mode = true;
         return;
     }
-    if line == "protover" {
-        println!("feature myname=\"rce\" variants=\"normal\" colors=0 time=1 sigint=0");
+    if line.starts_with("protover") {
+        // XBoard protocol version 2 feature negotiation
+        println!("feature myname=\"rce-ml\" variants=\"normal\" done=0");
+        println!("feature setboard=1 usermove=0 time=1 draw=1 sigint=0 sigterm=0");
+        println!("feature reuse=1 analyze=0 colors=0 names=0");
+        println!("feature ping=1 playother=1 san=0 debug=1");
+        println!("feature memory=0 smp=0 egt=\"\"");
+        println!("feature option=\"Skill Level -spin 5 1 5\"");
+        println!("feature option=\"Use ML Evaluation -check 1\"");
+        println!("feature done=1");
         return;
     }
     if line == "new" {
         *b = Board::startpos();
         s.tt.lock().unwrap().clear();
+        s.force_mode = false;
+        s.engine_color = Some(Side::Black); // Engine plays black after "new"
         return;
     }
     if line.starts_with("setboard ") {
@@ -742,14 +806,30 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         return;
     }
     if line.starts_with("go") || line == "go" {
+        s.force_mode = false;
+        s.engine_color = Some(b.stm);
+
         let difficulty = *s.difficulty.lock().unwrap();
-        let depth = get_depth_for_difficulty(difficulty, None);
+        let depth = if let Some(d) = s.depth_limit {
+            d
+        } else {
+            get_depth_for_difficulty(difficulty, None)
+        };
+
+        let time_cs = if *xboard_mode {
+            calculate_xboard_time(s, b)
+        } else {
+            5000 // 5 seconds default for non-xboard mode
+        };
+
         let mut b2 = b.clone();
         let tt = s.tt.clone();
         let stop = s.stop.clone();
         let diff = s.difficulty.clone();
         let ml_eval = s.ml_evaluator.clone();
         let use_ml = s.use_ml.clone();
+        let post_mode = s.post_mode;
+
         s.handle = Some(std::thread::spawn(move || {
             stop.store(false, Ordering::Relaxed);
             let mut si = SearchInstance {
@@ -760,10 +840,20 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                     difficulty: diff,
                     ml_evaluator: ml_eval,
                     use_ml,
+                    force_mode: false,
+                    post_mode,
+                    engine_color: None,
+                    xboard_time: 0,
+                    xboard_otim: 0,
+                    time_per_move: None,
+                    depth_limit: None,
+                    level_moves: 0,
+                    level_base: 0,
+                    level_inc: 0,
                 },
                 nodes: 0,
                 start: Instant::now(),
-                time_limit: Duration::from_millis(5000),
+                time_limit: Duration::from_millis((time_cs * 10) as u64),
                 killers: [[None; 2]; MAX_PLY],
                 history: [[[0; 64]; 64]; 2],
             };
@@ -776,6 +866,63 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
     }
     if line.starts_with("move ") {
         xboard_make_move(line, b);
+
+        // In XBoard mode, if not in force mode and it's now the engine's turn, search
+        if *xboard_mode && !s.force_mode {
+            if let Some(engine_color) = s.engine_color {
+                if b.stm == engine_color {
+                    // Automatically search and move
+                    let difficulty = *s.difficulty.lock().unwrap();
+                    let depth = if let Some(d) = s.depth_limit {
+                        d
+                    } else {
+                        get_depth_for_difficulty(difficulty, None)
+                    };
+
+                    let time_cs = calculate_xboard_time(s, b);
+                    let mut b2 = b.clone();
+                    let tt = s.tt.clone();
+                    let stop = s.stop.clone();
+                    let diff = s.difficulty.clone();
+                    let ml_eval = s.ml_evaluator.clone();
+                    let use_ml = s.use_ml.clone();
+                    let post_mode = s.post_mode;
+
+                    s.handle = Some(std::thread::spawn(move || {
+                        stop.store(false, Ordering::Relaxed);
+                        let mut si = SearchInstance {
+                            searcher: Searcher {
+                                tt,
+                                stop,
+                                handle: None,
+                                difficulty: diff,
+                                ml_evaluator: ml_eval,
+                                use_ml,
+                                force_mode: false,
+                                post_mode,
+                                engine_color: None,
+                                xboard_time: 0,
+                                xboard_otim: 0,
+                                time_per_move: None,
+                                depth_limit: None,
+                                level_moves: 0,
+                                level_base: 0,
+                                level_inc: 0,
+                            },
+                            nodes: 0,
+                            start: Instant::now(),
+                            time_limit: Duration::from_millis((time_cs * 10) as u64),
+                            killers: [[None; 2]; MAX_PLY],
+                            history: [[[0; 64]; 64]; 2],
+                        };
+                        let (_score, mv) = si.search(&mut b2, depth);
+                        if let Some(m) = mv {
+                            println!("move {}", move_to_str(m));
+                        }
+                    }));
+                }
+            }
+        }
         return;
     }
     if line.starts_with("hint") {
@@ -797,6 +944,16 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                     difficulty: diff,
                     ml_evaluator: ml_eval,
                     use_ml,
+                    force_mode: false,
+                    post_mode: false,
+                    engine_color: None,
+                    xboard_time: 0,
+                    xboard_otim: 0,
+                    time_per_move: None,
+                    depth_limit: None,
+                    level_moves: 0,
+                    level_base: 0,
+                    level_inc: 0,
                 },
                 nodes: 0,
                 start: Instant::now(),
@@ -812,18 +969,73 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         return;
     }
     if line == "force" {
+        s.force_mode = true;
+        // Stop any ongoing search
+        s.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = s.handle.take() {
+            let _ = h.join();
+        }
         return;
-    } // Stop searching (not implemented in detail)
+    }
     if line == "random" {
+        // Randomness is controlled via difficulty levels
         return;
     }
-    if line.starts_with("level") {
-        return;
-    } // Time controls (not implemented in detail)
-    if line.starts_with("time") {
+    if line.starts_with("level ") {
+        // Format: level MOVES BASE INC
+        // MOVES = moves per time control (0 for game in BASE)
+        // BASE = base time in minutes
+        // INC = increment in seconds
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 4 {
+            if let (Ok(moves), Ok(base), Ok(inc)) = (
+                parts[1].parse::<i32>(),
+                parts[2].parse::<i32>(),
+                parts[3].parse::<i32>(),
+            ) {
+                s.level_moves = moves;
+                s.level_base = base * 60 * 100; // Convert minutes to centiseconds
+                s.level_inc = inc * 100; // Convert seconds to centiseconds
+                // Reset time to base time
+                s.xboard_time = s.level_base;
+            }
+        }
         return;
     }
-    if line.starts_with("otim") {
+    if line.starts_with("st ") {
+        // Set fixed time per move in seconds
+        if let Some(time_str) = line.split_whitespace().nth(1) {
+            if let Ok(seconds) = time_str.parse::<i32>() {
+                s.time_per_move = Some(seconds * 100); // Convert to centiseconds
+            }
+        }
+        return;
+    }
+    if line.starts_with("sd ") {
+        // Set depth limit
+        if let Some(depth_str) = line.split_whitespace().nth(1) {
+            if let Ok(depth) = depth_str.parse::<i32>() {
+                s.depth_limit = Some(depth);
+            }
+        }
+        return;
+    }
+    if line.starts_with("time ") {
+        // Set engine's remaining time in centiseconds
+        if let Some(time_str) = line.split_whitespace().nth(1) {
+            if let Ok(time) = time_str.parse::<i32>() {
+                s.xboard_time = time;
+            }
+        }
+        return;
+    }
+    if line.starts_with("otim ") {
+        // Set opponent's remaining time in centiseconds
+        if let Some(time_str) = line.split_whitespace().nth(1) {
+            if let Ok(time) = time_str.parse::<i32>() {
+                s.xboard_otim = time;
+            }
+        }
         return;
     }
     if line == "remove" {
@@ -842,7 +1054,66 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         return;
     }
 
+    if line.starts_with("ping ") {
+        // Respond with pong and the same number
+        if let Some(num) = line.split_whitespace().nth(1) {
+            println!("pong {}", num);
+        }
+        return;
+    }
+    if line == "?" {
+        // Move now - interrupt search and return best move so far
+        s.stop.store(true, Ordering::Relaxed);
+        return;
+    }
+    if line == "playother" {
+        // Switch sides - engine plays the opposite color
+        s.engine_color = Some(if b.stm == Side::White { Side::Black } else { Side::White });
+        s.force_mode = false;
+        return;
+    }
+    if line == "post" {
+        s.post_mode = true;
+        return;
+    }
+    if line == "nopost" {
+        s.post_mode = false;
+        return;
+    }
+    if line == "hard" {
+        // Enable pondering (not implemented)
+        return;
+    }
+    if line == "easy" {
+        // Disable pondering (not implemented)
+        return;
+    }
+    if line.starts_with("result ") {
+        // Game ended - just acknowledge
+        return;
+    }
+    if line == "computer" {
+        // Opponent is a computer
+        return;
+    }
+    if line.starts_with("name ") {
+        // Opponent's name
+        return;
+    }
+    if line.starts_with("rating ") {
+        // Player ratings
+        return;
+    }
+    if line == "draw" {
+        // Draw offer - decline for now
+        return;
+    }
+    if line.starts_with("accepted ") || line.starts_with("rejected ") {
+        // Feature negotiation responses
+        return;
+    }
     if line == "quit" {
+        std::process::exit(0);
     }
 }
 
