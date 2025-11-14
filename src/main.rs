@@ -57,6 +57,12 @@ const ROOK_SEMI_OPEN_BONUS: i32 = 12;
 const DOUBLED_PAWN_PENALTY: i32 = 12;
 const ISOLATED_PAWN_PENALTY: i32 = 15;
 
+// Performance tuning constants
+const MAX_MOVE_TIME_MS: u64 = 60000; // Hard limit: 60 seconds per move
+const MIN_MOVE_TIME_MS: u64 = 50;    // Minimum time to think
+const TIME_SAFETY_MARGIN_MS: u64 = 100; // Reserve time to avoid timeouts
+const ML_TIME_MULTIPLIER: f64 = 0.3; // Reduce time allocation when ML is enabled (ML is ~10x slower)
+
 const FILE_MASKS: [u64; 8] = [
     0x0101010101010101,
     0x0202020202020202,
@@ -167,7 +173,7 @@ impl Searcher {
             handle: None,
             difficulty: Arc::new(Mutex::new(5)), // Default to Expert level
             ml_evaluator: Arc::new(Mutex::new(ml_eval)),
-            use_ml: Arc::new(Mutex::new(true)), // ML enabled by default
+            use_ml: Arc::new(Mutex::new(false)), // ML disabled by default (uses random weights, very slow)
             // XBoard defaults
             force_mode: false,
             post_mode: false,
@@ -683,7 +689,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         println!("id name rce-ml");
         println!("id author openai + neural network");
         println!("option name Skill Level type spin default 5 min 1 max 5");
-        println!("option name Use ML Evaluation type check default true");
+        println!("option name Use ML Evaluation type check default false");
         println!("option name ML Model Path type string default <empty>");
 
         // Print ML status
@@ -722,8 +728,9 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
     if line.starts_with("go") {
         let params = parse_go(line);
         let difficulty = *s.difficulty.lock().unwrap();
-        let depth = get_depth_for_difficulty(difficulty, params.depth);
-        let time_ms = time_for_move(b.stm, &params);
+        let use_ml = *s.use_ml.lock().unwrap();
+        let time_ms = time_for_move(b.stm, &params, use_ml);
+        let depth = get_depth_for_difficulty(difficulty, params.depth, use_ml, time_ms);
         let mut b2 = b.clone();
         let tt = s.tt.clone();
         let stop = s.stop.clone();
@@ -790,7 +797,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         println!("feature ping=1 playother=1 san=0 debug=1");
         println!("feature memory=0 smp=0 egt=\"\"");
         println!("feature option=\"Skill Level -spin 5 1 5\"");
-        println!("feature option=\"Use ML Evaluation -check 1\"");
+        println!("feature option=\"Use ML Evaluation -check 0\"");
         println!("feature done=1");
         return;
     }
@@ -810,16 +817,20 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         s.engine_color = Some(b.stm);
 
         let difficulty = *s.difficulty.lock().unwrap();
-        let depth = if let Some(d) = s.depth_limit {
-            d
-        } else {
-            get_depth_for_difficulty(difficulty, None)
-        };
+        let use_ml = *s.use_ml.lock().unwrap();
 
         let time_cs = if *xboard_mode {
             calculate_xboard_time(s, b)
         } else {
             5000 // 5 seconds default for non-xboard mode
+        };
+
+        let time_ms = (time_cs * 10) as u64;
+        let depth = if let Some(d) = s.depth_limit {
+            // Respect depth limit but apply adaptive capping
+            get_depth_for_difficulty(difficulty, Some(d), use_ml, time_ms)
+        } else {
+            get_depth_for_difficulty(difficulty, None, use_ml, time_ms)
         };
 
         let mut b2 = b.clone();
@@ -873,13 +884,16 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                 if b.stm == engine_color {
                     // Automatically search and move
                     let difficulty = *s.difficulty.lock().unwrap();
-                    let depth = if let Some(d) = s.depth_limit {
-                        d
-                    } else {
-                        get_depth_for_difficulty(difficulty, None)
-                    };
+                    let use_ml = *s.use_ml.lock().unwrap();
 
                     let time_cs = calculate_xboard_time(s, b);
+                    let time_ms = (time_cs * 10) as u64;
+
+                    let depth = if let Some(d) = s.depth_limit {
+                        get_depth_for_difficulty(difficulty, Some(d), use_ml, time_ms)
+                    } else {
+                        get_depth_for_difficulty(difficulty, None, use_ml, time_ms)
+                    };
                     let mut b2 = b.clone();
                     let tt = s.tt.clone();
                     let stop = s.stop.clone();
@@ -927,7 +941,9 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
     }
     if line.starts_with("hint") {
         let difficulty = *s.difficulty.lock().unwrap();
-        let depth = get_depth_for_difficulty(difficulty, Some(4));
+        let use_ml_flag = *s.use_ml.lock().unwrap();
+        let time_ms = 2000; // 2 seconds for hints
+        let depth = get_depth_for_difficulty(difficulty, Some(4), use_ml_flag, time_ms);
         let mut b2 = b.clone();
         let tt = s.tt.clone();
         let stop = s.stop.clone();
@@ -1159,42 +1175,81 @@ fn handle_setoption(cmd: &str, s: &mut Searcher) {
     }
 }
 
-fn get_depth_for_difficulty(difficulty: u8, requested_depth: Option<i32>) -> i32 {
-    // If depth is explicitly requested, respect it for Expert level only
-    if difficulty == 5 {
-        return requested_depth.unwrap_or(100);
+fn get_depth_for_difficulty(difficulty: u8, requested_depth: Option<i32>, use_ml: bool, time_ms: u64) -> i32 {
+    // Calculate adaptive max depth based on time and ML usage
+    let adaptive_max_depth = if use_ml {
+        // ML is very slow, limit depth based on time
+        if time_ms < 1000 {
+            3  // < 1 second: very shallow
+        } else if time_ms < 5000 {
+            5  // < 5 seconds: shallow
+        } else if time_ms < 15000 {
+            7  // < 15 seconds: moderate
+        } else if time_ms < 30000 {
+            10 // < 30 seconds: deep
+        } else {
+            12 // >= 30 seconds: very deep (but still limited for ML)
+        }
+    } else {
+        // Classical evaluation is fast, can search deeper
+        if time_ms < 1000 {
+            6  // < 1 second
+        } else if time_ms < 5000 {
+            10 // < 5 seconds
+        } else if time_ms < 15000 {
+            15 // < 15 seconds
+        } else {
+            100 // >= 15 seconds: search until time runs out
+        }
+    };
+
+    // If depth is explicitly requested, respect it but cap at adaptive max
+    if let Some(depth) = requested_depth {
+        return depth.min(adaptive_max_depth);
     }
 
-    // Otherwise use difficulty-based depth
-    match difficulty {
+    // Otherwise use difficulty-based depth, capped at adaptive max
+    let difficulty_depth = match difficulty {
         1 => 2,  // Beginner
         2 => 3,  // Easy
         3 => 5,  // Medium
         4 => 7,  // Hard
-        _ => requested_depth.unwrap_or(100), // Expert (default)
-    }
+        _ => adaptive_max_depth, // Expert: use adaptive max
+    };
+
+    difficulty_depth.min(adaptive_max_depth)
 }
 
-fn time_for_move(stm: Side, params: &GoParams) -> u64 {
+fn time_for_move(stm: Side, params: &GoParams, use_ml: bool) -> u64 {
     if let Some(mt) = params.movetime {
-        return mt;
+        // Apply hard limit even when movetime is specified
+        return mt.min(MAX_MOVE_TIME_MS);
     }
     let (time, inc) = if stm == Side::White {
         (params.wtime, params.winc)
     } else {
         (params.btime, params.binc)
     };
-    let moves_to_go = params.movestogo.unwrap_or(60).max(1);
-    match time {
+    let moves_to_go = params.movestogo.unwrap_or(40).max(1);
+    let mut allocated = match time {
         Some(t) => {
             let base = t / moves_to_go;
             let bonus = inc.unwrap_or(0) / 2;
             let slice = base + bonus;
-            let max_allowed = t.saturating_sub(50).max(50);
-            slice.max(50).min(max_allowed)
+            let max_allowed = t.saturating_sub(TIME_SAFETY_MARGIN_MS).max(MIN_MOVE_TIME_MS);
+            slice.max(MIN_MOVE_TIME_MS).min(max_allowed)
         }
-        None => 2000,
+        None => 5000, // Default 5 seconds
+    };
+
+    // Reduce time allocation when ML is enabled (ML is much slower)
+    if use_ml {
+        allocated = ((allocated as f64) * ML_TIME_MULTIPLIER) as u64;
+        allocated = allocated.max(MIN_MOVE_TIME_MS);
     }
+
+    // Apply hard maximum time limit
+    allocated.min(MAX_MOVE_TIME_MS)
 }
 
 fn xboard_set_position(cmd: &str, b: &mut Board) {
