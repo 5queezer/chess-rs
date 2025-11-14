@@ -6,3 +6,15 @@ edition = "2024"
 [dependencies]
 rayon = "1.8"
 rand = "0.8"
+
+# ML Framework
+candle-core = "0.8"
+candle-nn = "0.8"
+safetensors = "0.4"
+half = "2.4"  # For FP16 support
+
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-nn/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal"]
+accelerate = ["candle-core/accelerate", "candle-nn/accelerate"]
