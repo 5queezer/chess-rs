@@ -1176,6 +1176,12 @@ fn handle_setoption(cmd: &str, s: &mut Searcher) {
 }
 
 fn get_depth_for_difficulty(difficulty: u8, requested_depth: Option<i32>, use_ml: bool, time_ms: u64) -> i32 {
+    // If depth is explicitly requested (e.g., "go depth 20"), honor it exactly
+    // Only apply adaptive limits when depth is not specified
+    if let Some(depth) = requested_depth {
+        return depth;
+    }
+
     // Calculate adaptive max depth based on time and ML usage
     let adaptive_max_depth = if use_ml {
         // ML is very slow, limit depth based on time
@@ -1203,12 +1209,7 @@ fn get_depth_for_difficulty(difficulty: u8, requested_depth: Option<i32>, use_ml
         }
     };
 
-    // If depth is explicitly requested, respect it but cap at adaptive max
-    if let Some(depth) = requested_depth {
-        return depth.min(adaptive_max_depth);
-    }
-
-    // Otherwise use difficulty-based depth, capped at adaptive max
+    // Use difficulty-based depth, capped at adaptive max
     let difficulty_depth = match difficulty {
         1 => 2,  // Beginner
         2 => 3,  // Easy
