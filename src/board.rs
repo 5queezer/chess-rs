@@ -430,124 +430,120 @@ impl Board {
         let bb_opp = self.bb_side[stm.flip() as usize];
         let bb_occ = bb_own | bb_opp;
 
-        let pawns = self.bb_piece[stm as usize][PAWN];
-        if stm == Side::White {
-            let mut fwd = (pawns << 8) & !bb_occ;
-            let mut dbl = ((fwd & RANK_3) << 8) & !bb_occ;
-            while fwd > 0 {
-                let to = pop_lsb(&mut fwd);
-                let from_sq = to - 8;
-                if to >= 56 {
-                    for &promo in &PROMOTION_PIECES {
-                        list.push(Move { from: from_sq as u8, to: to as u8, promo, flags: 0 });
-                    }
-                } else {
-                    list.push(Move { from: from_sq as u8, to: to as u8, promo: 255, flags: 0 });
-                }
-            }
-            while dbl > 0 {
-                let to = pop_lsb(&mut dbl);
-                list.push(Move { from: (to - 16) as u8, to: to as u8, promo: 255, flags: 0 });
-            }
-            let mut l = ((pawns & !FILE_A) << 7) & bb_opp;
-            let mut r = ((pawns & !FILE_H) << 9) & bb_opp;
-            while l > 0 {
-                let to = pop_lsb(&mut l);
-                let from_sq = to - 7;
-                if to >= 56 {
-                    for &promo in &PROMOTION_PIECES {
-                        list.push(Move { from: from_sq as u8, to: to as u8, promo, flags: FLAG_CAPTURE });
-                    }
-                } else {
-                    list.push(Move { from: from_sq as u8, to: to as u8, promo: 255, flags: FLAG_CAPTURE });
-                }
-            }
-            while r > 0 {
-                let to = pop_lsb(&mut r);
-                let from_sq = to - 9;
-                if to >= 56 {
-                    for &promo in &PROMOTION_PIECES {
-                        list.push(Move { from: from_sq as u8, to: to as u8, promo, flags: FLAG_CAPTURE });
-                    }
-                } else {
-                    list.push(Move { from: from_sq as u8, to: to as u8, promo: 255, flags: FLAG_CAPTURE });
-                }
-            }
-        } else {
-            let mut fwd = (pawns >> 8) & !bb_occ;
-            let mut dbl = ((fwd & RANK_6) >> 8) & !bb_occ;
-            while fwd > 0 {
-                let to = pop_lsb(&mut fwd);
-                let from_sq = to + 8;
-                if to < 8 {
-                    for &promo in &PROMOTION_PIECES {
-                        list.push(Move { from: from_sq as u8, to: to as u8, promo, flags: 0 });
-                    }
-                } else {
-                    list.push(Move { from: from_sq as u8, to: to as u8, promo: 255, flags: 0 });
-                }
-            }
-            while dbl > 0 {
-                let to = pop_lsb(&mut dbl);
-                list.push(Move { from: (to + 16) as u8, to: to as u8, promo: 255, flags: 0 });
-            }
-            let mut l = ((pawns & !FILE_A) >> 9) & bb_opp;
-            let mut r = ((pawns & !FILE_H) >> 7) & bb_opp;
-            while l > 0 {
-                let to = pop_lsb(&mut l);
-                let from_sq = to + 9;
-                if to < 8 {
-                    for &promo in &PROMOTION_PIECES {
-                        list.push(Move { from: from_sq as u8, to: to as u8, promo, flags: FLAG_CAPTURE });
-                    }
-                } else {
-                    list.push(Move { from: from_sq as u8, to: to as u8, promo: 255, flags: FLAG_CAPTURE });
-                }
-            }
-            while r > 0 {
-                let to = pop_lsb(&mut r);
-                let from_sq = to + 7;
-                if to < 8 {
-                    for &promo in &PROMOTION_PIECES {
-                        list.push(Move { from: from_sq as u8, to: to as u8, promo, flags: FLAG_CAPTURE });
-                    }
-                } else {
-                    list.push(Move { from: from_sq as u8, to: to as u8, promo: 255, flags: FLAG_CAPTURE });
-                }
-            }
-        }
+        self.gen_pawn_moves(list, stm, bb_occ, bb_opp);
+        self.gen_en_passant_moves(list, stm);
+        self.gen_knight_moves(list, stm, bb_own, bb_opp);
+        self.gen_sliding_piece_moves(list, stm, bb_own, bb_opp, bb_occ);
+        self.gen_castling_moves(list, stm, bb_occ);
+    }
 
-        if self.ep != 255 {
-            let ep_sq = self.ep as usize;
-            if stm == Side::White {
-                if ep_sq >= 9 && ep_sq % 8 != 0 {
-                    let from_sq = ep_sq - 9;
-                    if pawns & (1u64 << from_sq) != 0 {
-                        list.push(Move { from: from_sq as u8, to: ep_sq as u8, promo: 255, flags: FLAG_CAPTURE | FLAG_EN_PASSANT });
-                    }
-                }
-                if ep_sq >= 7 && ep_sq % 8 != 7 {
-                    let from_sq = ep_sq - 7;
-                    if pawns & (1u64 << from_sq) != 0 {
-                        list.push(Move { from: from_sq as u8, to: ep_sq as u8, promo: 255, flags: FLAG_CAPTURE | FLAG_EN_PASSANT });
-                    }
+    fn gen_pawn_moves(&self, list: &mut Vec<Move>, stm: Side, bb_occ: u64, bb_opp: u64) {
+        let pawns = self.bb_piece[stm as usize][PAWN];
+
+        if stm == Side::White {
+            self.gen_white_pawn_pushes(list, pawns, bb_occ);
+            self.gen_white_pawn_captures(list, pawns, bb_opp);
+        } else {
+            self.gen_black_pawn_pushes(list, pawns, bb_occ);
+            self.gen_black_pawn_captures(list, pawns, bb_opp);
+        }
+    }
+
+    fn gen_white_pawn_pushes(&self, list: &mut Vec<Move>, pawns: u64, bb_occ: u64) {
+        let mut fwd = (pawns << 8) & !bb_occ;
+        let mut dbl = ((fwd & RANK_3) << 8) & !bb_occ;
+
+        self.add_pawn_moves(list, &mut fwd, -8, 56, 0);
+
+        while dbl > 0 {
+            let to = pop_lsb(&mut dbl);
+            list.push(Move { from: (to - 16) as u8, to: to as u8, promo: 255, flags: 0 });
+        }
+    }
+
+    fn gen_black_pawn_pushes(&self, list: &mut Vec<Move>, pawns: u64, bb_occ: u64) {
+        let mut fwd = (pawns >> 8) & !bb_occ;
+        let mut dbl = ((fwd & RANK_6) >> 8) & !bb_occ;
+
+        self.add_pawn_moves(list, &mut fwd, 8, 8, 0);
+
+        while dbl > 0 {
+            let to = pop_lsb(&mut dbl);
+            list.push(Move { from: (to + 16) as u8, to: to as u8, promo: 255, flags: 0 });
+        }
+    }
+
+    fn gen_white_pawn_captures(&self, list: &mut Vec<Move>, pawns: u64, bb_opp: u64) {
+        let mut l = ((pawns & !FILE_A) << 7) & bb_opp;
+        let mut r = ((pawns & !FILE_H) << 9) & bb_opp;
+
+        self.add_pawn_moves(list, &mut l, -7, 56, FLAG_CAPTURE);
+        self.add_pawn_moves(list, &mut r, -9, 56, FLAG_CAPTURE);
+    }
+
+    fn gen_black_pawn_captures(&self, list: &mut Vec<Move>, pawns: u64, bb_opp: u64) {
+        let mut l = ((pawns & !FILE_A) >> 9) & bb_opp;
+        let mut r = ((pawns & !FILE_H) >> 7) & bb_opp;
+
+        self.add_pawn_moves(list, &mut l, 9, 8, FLAG_CAPTURE);
+        self.add_pawn_moves(list, &mut r, 7, 8, FLAG_CAPTURE);
+    }
+
+    fn add_pawn_moves(&self, list: &mut Vec<Move>, bitboard: &mut u64, offset: i32, promo_rank: usize, flags: u8) {
+        while *bitboard > 0 {
+            let to = pop_lsb(bitboard);
+            let from_sq = (to as i32 + offset) as usize;
+
+            let is_promotion = if offset < 0 { to >= promo_rank } else { to < promo_rank };
+
+            if is_promotion {
+                for &promo in &PROMOTION_PIECES {
+                    list.push(Move { from: from_sq as u8, to: to as u8, promo, flags });
                 }
             } else {
-                if ep_sq <= 56 && ep_sq % 8 != 0 {
-                    let from_sq = ep_sq + 7;
-                    if pawns & (1u64 << from_sq) != 0 {
-                        list.push(Move { from: from_sq as u8, to: ep_sq as u8, promo: 255, flags: FLAG_CAPTURE | FLAG_EN_PASSANT });
-                    }
-                }
-                if ep_sq <= 54 && ep_sq % 8 != 7 {
-                    let from_sq = ep_sq + 9;
-                    if pawns & (1u64 << from_sq) != 0 {
-                        list.push(Move { from: from_sq as u8, to: ep_sq as u8, promo: 255, flags: FLAG_CAPTURE | FLAG_EN_PASSANT });
-                    }
-                }
+                list.push(Move { from: from_sq as u8, to: to as u8, promo: 255, flags });
             }
         }
+    }
 
+    fn gen_en_passant_moves(&self, list: &mut Vec<Move>, stm: Side) {
+        if self.ep == 255 {
+            return;
+        }
+
+        let ep_sq = self.ep as usize;
+        let pawns = self.bb_piece[stm as usize][PAWN];
+
+        if stm == Side::White {
+            self.try_add_ep_move(list, ep_sq, pawns, -9, 9, 0);
+            self.try_add_ep_move(list, ep_sq, pawns, -7, 7, 7);
+        } else {
+            self.try_add_ep_move(list, ep_sq, pawns, 7, 56, 0);
+            self.try_add_ep_move(list, ep_sq, pawns, 9, 54, 7);
+        }
+    }
+
+    fn try_add_ep_move(&self, list: &mut Vec<Move>, ep_sq: usize, pawns: u64, offset: i32, min_sq: usize, file_constraint: usize) {
+        let condition = if offset < 0 {
+            ep_sq >= min_sq && ep_sq % 8 != file_constraint
+        } else {
+            ep_sq <= min_sq && ep_sq % 8 != file_constraint
+        };
+
+        if condition {
+            let from_sq = (ep_sq as i32 + offset) as usize;
+            if pawns & (1u64 << from_sq) != 0 {
+                list.push(Move {
+                    from: from_sq as u8,
+                    to: ep_sq as u8,
+                    promo: 255,
+                    flags: FLAG_CAPTURE | FLAG_EN_PASSANT,
+                });
+            }
+        }
+    }
+
+    fn gen_knight_moves(&self, list: &mut Vec<Move>, stm: Side, bb_own: u64, bb_opp: u64) {
         let knights = self.bb_piece[stm as usize][KNIGHT];
         for from in Bitscan::new(knights) {
             let mut attacks = unsafe { NATT[from] };
@@ -561,7 +557,9 @@ impl Board {
                 });
             }
         }
+    }
 
+    fn gen_sliding_piece_moves(&self, list: &mut Vec<Move>, stm: Side, bb_own: u64, bb_opp: u64, bb_occ: u64) {
         for p in 2..6 {
             let mut bbp = self.bb_piece[stm as usize][p];
             while bbp > 0 {
@@ -585,8 +583,11 @@ impl Board {
                 }
             }
         }
+    }
 
+    fn gen_castling_moves(&self, list: &mut Vec<Move>, stm: Side, bb_occ: u64) {
         let king_sq = self.bb_piece[stm as usize][KING].trailing_zeros() as usize;
+
         if stm == Side::White {
             if self.castling & 1 != 0
                 && king_sq == 4
