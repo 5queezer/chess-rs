@@ -18,7 +18,7 @@ pub const TOTAL_PLANES: usize = PIECE_PLANES * HISTORY_POSITIONS + AUXILIARY_PLA
 /// - 0-11: Current position (WP, WN, WB, WR, WQ, WK, BP, BN, BB, BR, BQ, BK)
 /// - 12-23: Position 1 move ago
 /// - 24-35: Position 2 moves ago
-/// ... (up to 8 positions of history)
+/// - ... (up to 8 positions of history)
 /// - 96: White kingside castling
 /// - 97: White queenside castling
 /// - 98: Black kingside castling
@@ -28,6 +28,7 @@ pub const TOTAL_PLANES: usize = PIECE_PLANES * HISTORY_POSITIONS + AUXILIARY_PLA
 /// - 102: Halfmove clock / 50 (normalized)
 pub struct BoardEncoder {
     history: Vec<Board>,
+    #[allow(dead_code)]
     max_history: usize,
 }
 
@@ -40,6 +41,7 @@ impl BoardEncoder {
     }
 
     /// Update history with current board position
+    #[allow(dead_code)]
     pub fn push_position(&mut self, board: &Board) {
         self.history.push(board.clone());
         if self.history.len() > self.max_history {
@@ -48,6 +50,7 @@ impl BoardEncoder {
     }
 
     /// Clear position history
+    #[allow(dead_code)]
     pub fn clear_history(&mut self) {
         self.history.clear();
     }

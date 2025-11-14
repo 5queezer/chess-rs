@@ -2,7 +2,7 @@
 
 use crate::board::{Board, Move};
 use crate::ml::{BoardEncoder, ChessNet, DeviceManager, DevicePreference};
-use candle_core::{DType, Device, Result, Tensor};
+use candle_core::{DType, Result};
 use candle_nn::VarBuilder;
 use std::path::Path;
 use std::sync::Arc;
@@ -19,6 +19,7 @@ pub struct MLConfig {
     /// Blend factor between ML and classical evaluation (0.0 = all classical, 1.0 = all ML)
     pub blend_factor: f32,
     /// Batch size for inference (currently only 1 is supported)
+    #[allow(dead_code)]
     pub batch_size: usize,
 }
 
@@ -110,11 +111,13 @@ impl MLEvaluator {
     }
 
     /// Update position history (call this after each move)
+    #[allow(dead_code)]
     pub fn push_position(&mut self, board: &Board) {
         self.encoder.push_position(board);
     }
 
     /// Clear position history (call at start of new game)
+    #[allow(dead_code)]
     pub fn clear_history(&mut self) {
         self.encoder.clear_history();
     }
@@ -154,6 +157,7 @@ impl MLEvaluator {
 
     /// Get move probabilities from the policy network
     /// Returns vector of (move, probability) pairs for legal moves
+    #[allow(dead_code)]
     pub fn get_move_probabilities(&self, board: &Board, legal_moves: &[Move]) -> Result<Vec<(Move, f32)>> {
         if !self.is_ready {
             return Err(candle_core::Error::Msg(
@@ -197,6 +201,7 @@ impl MLEvaluator {
     /// Convert a move to policy network index
     /// This is a simplified version - proper implementation would use
     /// the AlphaZero move encoding scheme
+    #[allow(dead_code)]
     fn move_to_policy_index(m: Move) -> usize {
         let from = m.from as usize;
         let to = m.to as usize;
@@ -208,6 +213,7 @@ impl MLEvaluator {
     }
 
     /// Check if ML evaluation is ready
+    #[allow(dead_code)]
     pub fn is_ready(&self) -> bool {
         self.is_ready
     }
