@@ -955,9 +955,13 @@ impl Board {
         // (half_move counter tells us how far back that is)
         let lookback = (self.half_move as usize).min(self.hist.len());
 
-        for i in (0..lookback).step_by(2) {
-            if self.hist.len() >= i + 1 {
-                let idx = self.hist.len() - 1 - i;
+        // History stores positions BEFORE each move was made.
+        // To check same-side-to-move positions, we need to step by 2
+        // and start at the right parity: hist[len-2], hist[len-4], etc.
+        // These are positions where it was the same side's turn.
+        for i in (2..=lookback).step_by(2) {
+            if self.hist.len() >= i {
+                let idx = self.hist.len() - i;
                 if self.hist[idx].hash == self.hash {
                     count += 1;
                     if count >= 3 {

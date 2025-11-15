@@ -223,7 +223,14 @@ impl SearchInstance {
     fn search(&mut self, b: &mut Board, depth: i32) -> (i32, Option<Move>) {
         // Check if position is drawn before searching
         if b.is_draw() {
-            // Position is drawn by rule - return draw score and no move
+            // Position is drawn by rule - still return a legal move so GUI can handle it
+            // (returning no move causes issues with some GUIs like ChessX)
+            let mut moves = Vec::new();
+            b.gen_moves(&mut moves);
+            if !moves.is_empty() {
+                return (0, Some(moves[0]));
+            }
+            // No legal moves means stalemate (already drawn)
             return (0, None);
         }
 
