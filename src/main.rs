@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -306,6 +306,11 @@ impl SearchInstance {
                     hopeless_start = None;
                 }
 
+                break;
+            }
+
+            // Check time after completing each depth to avoid starting next depth too late
+            if self.timed_out() {
                 break;
             }
         }
@@ -691,6 +696,11 @@ fn pawn_structure_penalty(pawns: u64) -> i32 {
 fn main() {
     init_tables();
     init_zobrist();
+
+    // Ensure stdout is line-buffered for proper protocol communication
+    // This is especially important when stdout is connected to a pipe
+    let _ = io::stdout().flush(); // Initial flush to establish buffering mode
+
     let stdin = io::stdin();
     let mut b = Board::startpos();
     let mut searcher = Searcher::new();
@@ -701,6 +711,11 @@ fn main() {
         } else {
             break;
         }
+    }
+
+    // Wait for any pending search to complete before exiting
+    if let Some(h) = searcher.handle.take() {
+        let _ = h.join();
     }
 }
 
@@ -738,16 +753,19 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         }
 
         println!("uciok");
+        let _ = io::stdout().flush();
         return;
     }
     if line == "isready" {
         println!("readyok");
+        let _ = io::stdout().flush();
         return;
     }
     if line == "ucinewgame" {
         *b = Board::startpos();
         s.tt.lock().unwrap().clear();
         println!("readyok");
+        let _ = io::stdout().flush();
         return;
     }
     if line == "stop" {
@@ -765,7 +783,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         set_position(line, b);
         return;
     }
-    if line.starts_with("go") {
+    if line.starts_with("go") && !*xboard_mode {
         let params = parse_go(line);
         let difficulty = *s.difficulty.lock().unwrap();
         let use_ml = *s.use_ml.lock().unwrap();
@@ -805,9 +823,11 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                 history: [[[0; 64]; 64]; 2],
             };
             let (score, mv) = si.search(&mut b2, depth);
+            // Output both lines together to avoid any flushing issues
             if let Some(m) = mv {
-                println!("info depth {} score cp {} nodes {}", depth, score, si.nodes);
-                println!("bestmove {}", move_to_str(m));
+                let output = format!("info depth {} score cp {} nodes {}\nbestmove {}\n", depth, score, si.nodes, move_to_str(m));
+                print!("{}", output);
+                let _ = io::stdout().flush();
             } else {
                 println!("bestmove 0000");
             }
@@ -839,6 +859,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         println!("feature option=\"Skill Level -spin 5 1 5\"");
         println!("feature option=\"Use ML Evaluation -check 0\"");
         println!("feature done=1");
+        let _ = io::stdout().flush();
         return;
     }
     if line == "new" {
@@ -911,6 +932,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
             let (_score, mv) = si.search(&mut b2, depth);
             if let Some(m) = mv {
                 println!("move {}", move_to_str(m));
+                let _ = std::io::stdout().flush();
             }
         }));
         return;
@@ -972,6 +994,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
                         let (_score, mv) = si.search(&mut b2, depth);
                         if let Some(m) = mv {
                             println!("move {}", move_to_str(m));
+                            let _ = std::io::stdout().flush();
                         }
                     }));
                 }
@@ -1114,6 +1137,7 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
         // Respond with pong and the same number
         if let Some(num) = line.split_whitespace().nth(1) {
             println!("pong {}", num);
+            let _ = io::stdout().flush();
         }
         return;
     }
@@ -1170,6 +1194,74 @@ fn handle_line(line: &str, b: &mut Board, s: &mut Searcher, xboard_mode: &mut bo
     }
     if line == "quit" {
         std::process::exit(0);
+    }
+
+    // Try to parse as a raw move (XBoard usermove=0 mode)
+    // This handles moves like "e2e4", "g1f3", "e7e8q", etc.
+    if *xboard_mode && line.len() >= 4 && line.len() <= 5 {
+        if let Some(m) = str_to_move(b, line) {
+            b.make_move(m);
+
+            // If not in force mode and it's the engine's turn, search
+            if !s.force_mode {
+                if let Some(engine_color) = s.engine_color {
+                    if b.stm == engine_color {
+                        let difficulty = *s.difficulty.lock().unwrap();
+                        let use_ml = *s.use_ml.lock().unwrap();
+
+                        let time_cs = calculate_xboard_time(s, b);
+                        let time_ms = (time_cs * 10) as u64;
+
+                        let depth = if let Some(d) = s.depth_limit {
+                            get_depth_for_difficulty(difficulty, Some(d), use_ml, time_ms)
+                        } else {
+                            get_depth_for_difficulty(difficulty, None, use_ml, time_ms)
+                        };
+                        let mut b2 = b.clone();
+                        let tt = s.tt.clone();
+                        let stop = s.stop.clone();
+                        let diff = s.difficulty.clone();
+                        let ml_eval = s.ml_evaluator.clone();
+                        let use_ml = s.use_ml.clone();
+                        let post_mode = s.post_mode;
+
+                        s.handle = Some(std::thread::spawn(move || {
+                            stop.store(false, Ordering::Relaxed);
+                            let mut si = SearchInstance {
+                                searcher: Searcher {
+                                    tt,
+                                    stop,
+                                    handle: None,
+                                    difficulty: diff,
+                                    ml_evaluator: ml_eval,
+                                    use_ml,
+                                    force_mode: false,
+                                    post_mode,
+                                    engine_color: None,
+                                    xboard_time: 0,
+                                    xboard_otim: 0,
+                                    time_per_move: None,
+                                    depth_limit: None,
+                                    level_moves: 0,
+                                    level_base: 0,
+                                    level_inc: 0,
+                                },
+                                nodes: 0,
+                                start: Instant::now(),
+                                time_limit: Duration::from_millis((time_cs * 10) as u64),
+                                killers: [[None; 2]; MAX_PLY],
+                                history: [[[0; 64]; 64]; 2],
+                            };
+                            let (_score, mv) = si.search(&mut b2, depth);
+                            if let Some(m) = mv {
+                                println!("move {}", move_to_str(m));
+                                let _ = std::io::stdout().flush();
+                            }
+                        }));
+                    }
+                }
+            }
+        }
     }
 }
 
