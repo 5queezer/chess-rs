@@ -1,5 +1,8 @@
 # Rust Chess Engine with ML Capabilities
 
+> **⚠️ AI-Generated Code Notice**
+> This project contains code generated with AI assistance. The repository owner does not claim authorship or ownership of AI-generated portions. See [DISCLAIMER.md](DISCLAIMER.md) for details.
+
 A chess engine written in Rust with support for both UCI and XBoard/WinBoard protocols. Features include classical evaluation, optional AlphaZero-style neural network evaluation, difficulty levels, and full compatibility with popular chess GUIs.
 
 ## Building
