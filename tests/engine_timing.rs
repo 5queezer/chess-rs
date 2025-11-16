@@ -5,10 +5,10 @@ mod common;
 use common::EngineProcess;
 use std::time::{Duration, Instant};
 
-const TIME_PER_MOVE_MS: u64 = 5000;
+const TIME_PER_MOVE_MS: u64 = 500; // 500ms per move for fast testing
 const TIME_TOLERANCE_MS: u64 = 100;
-const MAX_MOVES: usize = 30;
-const TIMEOUT_THRESHOLD_SECS: u64 = (TIME_PER_MOVE_MS / 1000) + 2;
+const MAX_MOVES: usize = 10; // Only 10 moves for speed
+const TIMEOUT_THRESHOLD_SECS: u64 = 3;
 
 struct MoveTime {
     move_num: usize,

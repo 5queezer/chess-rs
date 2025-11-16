@@ -1,5 +1,7 @@
 //! Common test utilities for chess engine integration tests
 
+#![allow(dead_code)]
+
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
