@@ -1,69 +1,63 @@
 use crate::board::{move_to_str, Board, Move};
 use rayon::prelude::*;
 
-pub fn test(b: &Board, depth: u32) {
+pub fn test(board: &Board, depth: u32) {
     println!("perft {}", depth);
+
     if depth == 0 {
         println!("nodes 1");
         return;
     }
+
     let mut moves = Vec::new();
-    b.gen_moves(&mut moves);
+    board.gen_moves(&mut moves);
+
     let use_parallel = depth >= 3 && moves.len() > 1;
 
     let results: Vec<(Move, u64)> = if use_parallel {
-        moves
-            .into_par_iter()
-            .map(|m| {
-                let n = perft_from_move(b, m, depth - 1);
-                (m, n)
-            })
-            .collect()
+        moves.into_par_iter().map(|m| (m, count_nodes_from_move(board, m, depth - 1))).collect()
     } else {
-        moves
-            .into_iter()
-            .map(|m| {
-                let n = perft_from_move(b, m, depth - 1);
-                (m, n)
-            })
-            .collect()
+        moves.into_iter().map(|m| (m, count_nodes_from_move(board, m, depth - 1))).collect()
     };
 
     let total_nodes: u64 = results.iter().map(|(_, n)| *n).sum();
+
     for (m, n) in results {
         println!("{} {}", move_to_str(m), n);
     }
     println!("nodes {}", total_nodes);
 }
 
-fn perft_from_move(b: &Board, m: Move, depth: u32) -> u64 {
-    let mut child = b.clone();
+fn count_nodes_from_move(board: &Board, m: Move, depth: u32) -> u64 {
+    let mut child = board.clone();
     child.make_move(m);
+
     if child.in_check(child.stm.flip()) {
         return 0;
     }
+
     if depth == 0 {
         1
     } else {
-        perft_inner(&mut child, depth)
+        count_nodes(&mut child, depth)
     }
 }
 
-fn perft_inner(b: &mut Board, depth: u32) -> u64 {
+fn count_nodes(board: &mut Board, depth: u32) -> u64 {
     if depth == 0 {
         return 1;
     }
 
     let mut nodes = 0;
     let mut moves = Vec::new();
-    b.gen_moves(&mut moves);
+    board.gen_moves(&mut moves);
 
     for m in moves {
-        b.make_move(m);
-        if !b.in_check(b.stm.flip()) {
-            nodes += perft_inner(b, depth - 1);
+        board.make_move(m);
+        if !board.in_check(board.stm.flip()) {
+            nodes += count_nodes(board, depth - 1);
         }
-        b.unmake();
+        board.unmake();
     }
 
     nodes

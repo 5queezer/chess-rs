@@ -23,14 +23,12 @@ pub enum Side {
 
 impl Side {
     pub fn flip(&self) -> Self {
-        if *self == Side::White {
-            Side::Black
-        } else {
-            Side::White
+        match self {
+            Side::White => Side::Black,
+            Side::Black => Side::White,
         }
     }
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Move {
@@ -51,7 +49,7 @@ pub struct Undo {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct NullState {
+pub struct NullMoveState {
     pub ep: u8,
     pub half_move: u8,
     pub full_move: u16,
@@ -81,7 +79,7 @@ impl Board {
     }
 
     pub fn from_fen(fen: &str) -> Self {
-        let mut b = Self {
+        let mut board = Self {
             bb_piece: [[0; 6]; 2],
             bb_side: [0; 2],
             stm: Side::White,
@@ -97,6 +95,7 @@ impl Board {
         let board_str = it.next().unwrap();
         let mut rank = 7;
         let mut file = 0;
+
         for c in board_str.chars() {
             if c.is_ascii_digit() {
                 file += c.to_digit(10).unwrap();
@@ -104,11 +103,7 @@ impl Board {
                 rank -= 1;
                 file = 0;
             } else {
-                let side = if c.is_uppercase() {
-                    Side::White
-                } else {
-                    Side::Black
-                };
+                let side = if c.is_uppercase() { Side::White } else { Side::Black };
                 let piece = match c.to_ascii_lowercase() {
                     'p' => PAWN,
                     'n' => KNIGHT,
@@ -119,63 +114,50 @@ impl Board {
                     _ => panic!("invalid piece"),
                 };
                 let sq = rank * 8 + file;
-                b.bb_piece[side as usize][piece] |= 1u64 << sq;
-                b.bb_side[side as usize] |= 1u64 << sq;
+                board.bb_piece[side as usize][piece] |= 1u64 << sq;
+                board.bb_side[side as usize] |= 1u64 << sq;
                 file += 1;
             }
         }
 
-        b.stm = if it.next().unwrap() == "w" {
-            Side::White
-        } else {
-            Side::Black
-        };
+        board.stm = if it.next().unwrap() == "w" { Side::White } else { Side::Black };
 
         let castling_str = it.next().unwrap();
-        if castling_str.contains('K') {
-            b.castling |= 1;
-        }
-        if castling_str.contains('Q') {
-            b.castling |= 2;
-        }
-        if castling_str.contains('k') {
-            b.castling |= 4;
-        }
-        if castling_str.contains('q') {
-            b.castling |= 8;
-        }
+        if castling_str.contains('K') { board.castling |= 1; }
+        if castling_str.contains('Q') { board.castling |= 2; }
+        if castling_str.contains('k') { board.castling |= 4; }
+        if castling_str.contains('q') { board.castling |= 8; }
 
         let ep_str = it.next().unwrap();
         if ep_str != "-" {
-            b.ep = sq_from_str(ep_str).unwrap() as u8;
+            board.ep = parse_square(ep_str).unwrap() as u8;
         }
 
-        b.half_move = it.next().unwrap().parse().unwrap();
-        b.full_move = it.next().unwrap().parse().unwrap();
-
-        b.hash = b.calc_hash();
-        b
+        board.half_move = it.next().unwrap().parse().unwrap();
+        board.full_move = it.next().unwrap().parse().unwrap();
+        board.hash = board.calculate_zobrist_hash();
+        board
     }
 
-    fn calc_hash(&self) -> u64 {
-        let mut h = 0;
-        for c in 0..2 {
-            for p in 0..6 {
-                let mut bbp = self.bb_piece[c][p];
-                while bbp > 0 {
-                    let sq = pop_lsb(&mut bbp);
-                    h ^= unsafe { ZOBRIST_PIECE[c][p][sq] };
+    fn calculate_zobrist_hash(&self) -> u64 {
+        let mut hash = 0;
+        for color in 0..2 {
+            for piece in 0..6 {
+                let mut bitboard = self.bb_piece[color][piece];
+                while bitboard > 0 {
+                    let sq = pop_lsb(&mut bitboard);
+                    hash ^= unsafe { ZOBRIST_PIECE[color][piece][sq] };
                 }
             }
         }
-        h ^= unsafe { ZOBRIST_CASTLE[self.castling as usize] };
+        hash ^= unsafe { ZOBRIST_CASTLE[self.castling as usize] };
         if self.ep != 255 {
-            h ^= unsafe { ZOBRIST_EP[(self.ep % 8) as usize] };
+            hash ^= unsafe { ZOBRIST_EP[(self.ep % 8) as usize] };
         }
         if self.stm == Side::Black {
-            h ^= unsafe { ZOBRIST_STM };
+            hash ^= unsafe { ZOBRIST_STM };
         }
-        h
+        hash
     }
 
     pub fn make_move(&mut self, m: Move) {
@@ -183,19 +165,14 @@ impl Board {
         let from = m.from as usize;
         let to = m.to as usize;
         let capture_sq = if m.flags & FLAG_EN_PASSANT != 0 {
-            if stm == Side::White {
-                to - 8
-            } else {
-                to + 8
-            }
+            if stm == Side::White { to - 8 } else { to + 8 }
         } else {
             to
         };
+
         let undo = Undo {
             m,
-            captured: self
-                .piece_at(self.stm.flip(), capture_sq)
-                .map_or(255, |p| p as u8),
+            captured: self.piece_at(self.stm.flip(), capture_sq).map_or(255, |p| p as u8),
             castling: self.castling,
             ep: self.ep,
             half_move: self.half_move,
@@ -203,13 +180,14 @@ impl Board {
         };
         self.hist.push(undo);
 
-        let moved = self.piece_at(stm, from).unwrap();
+        let moved_piece = self.piece_at(stm, from).unwrap();
 
-        if moved == PAWN || undo.captured != 255 {
+        if moved_piece == PAWN || undo.captured != 255 {
             self.half_move = 0;
         } else {
             self.half_move += 1;
         }
+
         if stm == Side::Black {
             self.full_move += 1;
         }
@@ -219,20 +197,19 @@ impl Board {
         }
         self.ep = 255;
 
-        self.bb_piece[stm as usize][moved] ^= (1u64 << from) | (1u64 << to);
+        self.bb_piece[stm as usize][moved_piece] ^= (1u64 << from) | (1u64 << to);
         self.bb_side[stm as usize] ^= (1u64 << from) | (1u64 << to);
-        self.hash ^= unsafe { ZOBRIST_PIECE[stm as usize][moved][from] };
-        self.hash ^= unsafe { ZOBRIST_PIECE[stm as usize][moved][to] };
+        self.hash ^= unsafe { ZOBRIST_PIECE[stm as usize][moved_piece][from] };
+        self.hash ^= unsafe { ZOBRIST_PIECE[stm as usize][moved_piece][to] };
 
         if undo.captured != 255 {
             let captured_piece = undo.captured as usize;
             self.bb_piece[stm.flip() as usize][captured_piece] ^= 1u64 << capture_sq;
             self.bb_side[stm.flip() as usize] ^= 1u64 << capture_sq;
-            self.hash ^=
-                unsafe { ZOBRIST_PIECE[stm.flip() as usize][captured_piece][capture_sq] };
+            self.hash ^= unsafe { ZOBRIST_PIECE[stm.flip() as usize][captured_piece][capture_sq] };
         }
 
-        if moved == PAWN {
+        if moved_piece == PAWN {
             if (from as i32 - to as i32).abs() == 16 {
                 self.ep = ((from + to) / 2) as u8;
                 self.hash ^= unsafe { ZOBRIST_EP[(self.ep % 8) as usize] };
@@ -246,18 +223,10 @@ impl Board {
 
         if m.flags & FLAG_CASTLE != 0 {
             match (stm, to) {
-                (Side::White, 6) => {
-                    self.move_rook_for_castle(7, 5, stm);
-                }
-                (Side::White, 2) => {
-                    self.move_rook_for_castle(0, 3, stm);
-                }
-                (Side::Black, 62) => {
-                    self.move_rook_for_castle(63, 61, stm);
-                }
-                (Side::Black, 58) => {
-                    self.move_rook_for_castle(56, 59, stm);
-                }
+                (Side::White, 6) => self.move_rook_for_castling(7, 5, stm),
+                (Side::White, 2) => self.move_rook_for_castling(0, 3, stm),
+                (Side::Black, 62) => self.move_rook_for_castling(63, 61, stm),
+                (Side::Black, 58) => self.move_rook_for_castling(56, 59, stm),
                 _ => {}
             }
         }
@@ -270,27 +239,30 @@ impl Board {
         self.hash ^= unsafe { ZOBRIST_STM };
     }
 
-    pub fn make_null_move(&mut self) -> NullState {
-        let state = NullState {
+    pub fn make_null_move(&mut self) -> NullMoveState {
+        let state = NullMoveState {
             ep: self.ep,
             half_move: self.half_move,
             full_move: self.full_move,
             hash: self.hash,
         };
+
         if self.ep != 255 {
             self.hash ^= unsafe { ZOBRIST_EP[(self.ep % 8) as usize] };
         }
         self.ep = 255;
         self.half_move += 1;
+
         if self.stm == Side::Black {
             self.full_move += 1;
         }
+
         self.stm = self.stm.flip();
         self.hash ^= unsafe { ZOBRIST_STM };
         state
     }
 
-    pub fn unmake_null_move(&mut self, state: NullState) {
+    pub fn unmake_null_move(&mut self, state: NullMoveState) {
         self.stm = self.stm.flip();
         self.hash ^= unsafe { ZOBRIST_STM };
         self.ep = state.ep;
@@ -299,7 +271,7 @@ impl Board {
         self.hash = state.hash;
     }
 
-    fn move_rook_for_castle(&mut self, from: usize, to: usize, side: Side) {
+    fn move_rook_for_castling(&mut self, from: usize, to: usize, side: Side) {
         self.bb_piece[side as usize][ROOK] ^= (1u64 << from) | (1u64 << to);
         self.bb_side[side as usize] ^= (1u64 << from) | (1u64 << to);
         self.hash ^= unsafe { ZOBRIST_PIECE[side as usize][ROOK][from] };
@@ -309,7 +281,6 @@ impl Board {
     pub fn unmake(&mut self) {
         let undo = self.hist.pop().unwrap();
         self.stm = self.stm.flip();
-
         self.castling = undo.castling;
         self.ep = undo.ep;
         self.half_move = undo.half_move;
@@ -324,7 +295,7 @@ impl Board {
         let to = m.to as usize;
         let stm = self.stm;
 
-        let moved = if m.promo == 255 {
+        let moved_piece = if m.promo == 255 {
             self.piece_at(stm, to).unwrap()
         } else {
             self.bb_piece[stm as usize][m.promo as usize] ^= 1u64 << to;
@@ -332,7 +303,7 @@ impl Board {
             PAWN
         };
 
-        self.bb_piece[stm as usize][moved] ^= (1u64 << from) | (1u64 << to);
+        self.bb_piece[stm as usize][moved_piece] ^= (1u64 << from) | (1u64 << to);
         self.bb_side[stm as usize] ^= (1u64 << from) | (1u64 << to);
 
         if m.flags & FLAG_CASTLE != 0 {
@@ -342,8 +313,8 @@ impl Board {
                     self.bb_side[stm as usize] ^= (1u64 << 7) | (1u64 << 5);
                 }
                 (Side::White, 2) => {
-                    self.bb_piece[stm as usize][ROOK] ^= (1u64 << 0) | (1u64 << 3);
-                    self.bb_side[stm as usize] ^= (1u64 << 0) | (1u64 << 3);
+                    self.bb_piece[stm as usize][ROOK] ^= 1u64 | (1u64 << 3);
+                    self.bb_side[stm as usize] ^= 1u64 | (1u64 << 3);
                 }
                 (Side::Black, 62) => {
                     self.bb_piece[stm as usize][ROOK] ^= (1u64 << 63) | (1u64 << 61);
@@ -360,11 +331,7 @@ impl Board {
         if undo.captured != 255 {
             let captured_piece = undo.captured as usize;
             let capture_sq = if m.flags & FLAG_EN_PASSANT != 0 {
-                if stm == Side::White {
-                    to - 8
-                } else {
-                    to + 8
-                }
+                if stm == Side::White { to - 8 } else { to + 8 }
             } else {
                 to
             };
@@ -374,121 +341,114 @@ impl Board {
     }
 
     pub fn in_check(&self, side: Side) -> bool {
-        let ksq = self.bb_piece[side as usize][KING].trailing_zeros() as usize;
-        self.is_attacked(ksq, side.flip())
+        let king_sq = self.bb_piece[side as usize][KING].trailing_zeros() as usize;
+        self.is_square_attacked(king_sq, side.flip())
     }
 
-    pub fn is_attacked(&self, sq: usize, by: Side) -> bool {
-        let bb_opp = self.bb_side[by as usize];
-        let bb_own = self.bb_side[by.flip() as usize];
-        let bb_occ = bb_opp | bb_own;
+    pub fn is_square_attacked(&self, sq: usize, by: Side) -> bool {
+        let opponent_bb = self.bb_side[by as usize];
+        let own_bb = self.bb_side[by.flip() as usize];
+        let occupancy = opponent_bb | own_bb;
 
-        if by == Side::White {
-            if sq >= 9
-                && !sq.is_multiple_of(8)
-                && self.bb_piece[Side::White as usize][PAWN] & (1u64 << (sq - 9)) != 0
-            {
-                return true;
-            }
-            if sq >= 7
-                && (sq % 8 < 7)
-                && self.bb_piece[Side::White as usize][PAWN] & (1u64 << (sq - 7)) != 0
-            {
-                return true;
-            }
-        } else {
-            if sq < 56
-                && !sq.is_multiple_of(8)
-                && self.bb_piece[Side::Black as usize][PAWN] & (1u64 << (sq + 7)) != 0
-            {
-                return true;
-            }
-            if sq < 55
-                && (sq % 8 < 7)
-                && self.bb_piece[Side::Black as usize][PAWN] & (1u64 << (sq + 9)) != 0
-            {
-                return true;
-            }
+        if self.is_attacked_by_pawn(sq, by) {
+            return true;
         }
 
-        if unsafe { NATT[sq] } & self.bb_piece[by as usize][KNIGHT] != 0 { return true; }
-        if unsafe { KATT[sq] } & self.bb_piece[by as usize][KING] != 0 { return true; }
-        if bishop_attacks(sq, bb_occ) & (self.bb_piece[by as usize][BISHOP] | self.bb_piece[by as usize][QUEEN]) != 0 { return true; }
-        if rook_attacks(sq, bb_occ) & (self.bb_piece[by as usize][ROOK] | self.bb_piece[by as usize][QUEEN]) != 0 { return true; }
+        if unsafe { KNIGHT_ATTACKS[sq] } & self.bb_piece[by as usize][KNIGHT] != 0 {
+            return true;
+        }
+        if unsafe { KING_ATTACKS[sq] } & self.bb_piece[by as usize][KING] != 0 {
+            return true;
+        }
+        if bishop_attacks(sq, occupancy) & (self.bb_piece[by as usize][BISHOP] | self.bb_piece[by as usize][QUEEN]) != 0 {
+            return true;
+        }
+        if rook_attacks(sq, occupancy) & (self.bb_piece[by as usize][ROOK] | self.bb_piece[by as usize][QUEEN]) != 0 {
+            return true;
+        }
 
         false
     }
 
-    pub fn gen_moves(&self, list: &mut Vec<Move>) {
-        let stm = self.stm;
-        let bb_own = self.bb_side[stm as usize];
-        let bb_opp = self.bb_side[stm.flip() as usize];
-        let bb_occ = bb_own | bb_opp;
-
-        self.gen_pawn_moves(list, stm, bb_occ, bb_opp);
-        self.gen_en_passant_moves(list, stm);
-        self.gen_knight_moves(list, stm, bb_own, bb_opp);
-        self.gen_sliding_piece_moves(list, stm, bb_own, bb_opp, bb_occ);
-        self.gen_castling_moves(list, stm, bb_occ);
-    }
-
-    fn gen_pawn_moves(&self, list: &mut Vec<Move>, stm: Side, bb_occ: u64, bb_opp: u64) {
-        let pawns = self.bb_piece[stm as usize][PAWN];
-
-        if stm == Side::White {
-            self.gen_white_pawn_pushes(list, pawns, bb_occ);
-            self.gen_white_pawn_captures(list, pawns, bb_opp);
+    fn is_attacked_by_pawn(&self, sq: usize, by: Side) -> bool {
+        if by == Side::White {
+            (sq >= 9 && sq % 8 != 0 && self.bb_piece[Side::White as usize][PAWN] & (1u64 << (sq - 9)) != 0)
+                || (sq >= 7 && sq % 8 < 7 && self.bb_piece[Side::White as usize][PAWN] & (1u64 << (sq - 7)) != 0)
         } else {
-            self.gen_black_pawn_pushes(list, pawns, bb_occ);
-            self.gen_black_pawn_captures(list, pawns, bb_opp);
+            (sq < 56 && sq % 8 != 0 && self.bb_piece[Side::Black as usize][PAWN] & (1u64 << (sq + 7)) != 0)
+                || (sq < 55 && sq % 8 < 7 && self.bb_piece[Side::Black as usize][PAWN] & (1u64 << (sq + 9)) != 0)
         }
     }
 
-    fn gen_white_pawn_pushes(&self, list: &mut Vec<Move>, pawns: u64, bb_occ: u64) {
-        let mut fwd = (pawns << 8) & !bb_occ;
-        let mut dbl = ((fwd & RANK_3) << 8) & !bb_occ;
+    pub fn gen_moves(&self, list: &mut Vec<Move>) {
+        let stm = self.stm;
+        let own_bb = self.bb_side[stm as usize];
+        let opponent_bb = self.bb_side[stm.flip() as usize];
+        let occupancy = own_bb | opponent_bb;
 
-        self.add_pawn_moves(list, &mut fwd, -8, 56, 0);
+        self.generate_pawn_moves(list, stm, occupancy, opponent_bb);
+        self.generate_en_passant_moves(list, stm);
+        self.generate_knight_moves(list, stm, own_bb, opponent_bb);
+        self.generate_sliding_piece_moves(list, stm, own_bb, opponent_bb, occupancy);
+        self.generate_castling_moves(list, stm, occupancy);
+    }
 
-        while dbl > 0 {
-            let to = pop_lsb(&mut dbl);
+    fn generate_pawn_moves(&self, list: &mut Vec<Move>, stm: Side, occupancy: u64, opponent_bb: u64) {
+        let pawns = self.bb_piece[stm as usize][PAWN];
+
+        if stm == Side::White {
+            self.generate_white_pawn_pushes(list, pawns, occupancy);
+            self.generate_white_pawn_captures(list, pawns, opponent_bb);
+        } else {
+            self.generate_black_pawn_pushes(list, pawns, occupancy);
+            self.generate_black_pawn_captures(list, pawns, opponent_bb);
+        }
+    }
+
+    fn generate_white_pawn_pushes(&self, list: &mut Vec<Move>, pawns: u64, occupancy: u64) {
+        let mut forward = (pawns << 8) & !occupancy;
+        let mut double_push = ((forward & RANK_3) << 8) & !occupancy;
+
+        self.add_pawn_moves(list, &mut forward, -8, 56, 0);
+
+        while double_push > 0 {
+            let to = pop_lsb(&mut double_push);
             list.push(Move { from: (to - 16) as u8, to: to as u8, promo: 255, flags: 0 });
         }
     }
 
-    fn gen_black_pawn_pushes(&self, list: &mut Vec<Move>, pawns: u64, bb_occ: u64) {
-        let mut fwd = (pawns >> 8) & !bb_occ;
-        let mut dbl = ((fwd & RANK_6) >> 8) & !bb_occ;
+    fn generate_black_pawn_pushes(&self, list: &mut Vec<Move>, pawns: u64, occupancy: u64) {
+        let mut forward = (pawns >> 8) & !occupancy;
+        let mut double_push = ((forward & RANK_6) >> 8) & !occupancy;
 
-        self.add_pawn_moves(list, &mut fwd, 8, 8, 0);
+        self.add_pawn_moves(list, &mut forward, 8, 8, 0);
 
-        while dbl > 0 {
-            let to = pop_lsb(&mut dbl);
+        while double_push > 0 {
+            let to = pop_lsb(&mut double_push);
             list.push(Move { from: (to + 16) as u8, to: to as u8, promo: 255, flags: 0 });
         }
     }
 
-    fn gen_white_pawn_captures(&self, list: &mut Vec<Move>, pawns: u64, bb_opp: u64) {
-        let mut l = ((pawns & !FILE_A) << 7) & bb_opp;
-        let mut r = ((pawns & !FILE_H) << 9) & bb_opp;
+    fn generate_white_pawn_captures(&self, list: &mut Vec<Move>, pawns: u64, opponent_bb: u64) {
+        let mut left = ((pawns & !FILE_A) << 7) & opponent_bb;
+        let mut right = ((pawns & !FILE_H) << 9) & opponent_bb;
 
-        self.add_pawn_moves(list, &mut l, -7, 56, FLAG_CAPTURE);
-        self.add_pawn_moves(list, &mut r, -9, 56, FLAG_CAPTURE);
+        self.add_pawn_moves(list, &mut left, -7, 56, FLAG_CAPTURE);
+        self.add_pawn_moves(list, &mut right, -9, 56, FLAG_CAPTURE);
     }
 
-    fn gen_black_pawn_captures(&self, list: &mut Vec<Move>, pawns: u64, bb_opp: u64) {
-        let mut l = ((pawns & !FILE_A) >> 9) & bb_opp;
-        let mut r = ((pawns & !FILE_H) >> 7) & bb_opp;
+    fn generate_black_pawn_captures(&self, list: &mut Vec<Move>, pawns: u64, opponent_bb: u64) {
+        let mut left = ((pawns & !FILE_A) >> 9) & opponent_bb;
+        let mut right = ((pawns & !FILE_H) >> 7) & opponent_bb;
 
-        self.add_pawn_moves(list, &mut l, 9, 8, FLAG_CAPTURE);
-        self.add_pawn_moves(list, &mut r, 7, 8, FLAG_CAPTURE);
+        self.add_pawn_moves(list, &mut left, 9, 8, FLAG_CAPTURE);
+        self.add_pawn_moves(list, &mut right, 7, 8, FLAG_CAPTURE);
     }
 
     fn add_pawn_moves(&self, list: &mut Vec<Move>, bitboard: &mut u64, offset: i32, promo_rank: usize, flags: u8) {
         while *bitboard > 0 {
             let to = pop_lsb(bitboard);
             let from_sq = (to as i32 + offset) as usize;
-
             let is_promotion = if offset < 0 { to >= promo_rank } else { to < promo_rank };
 
             if is_promotion {
@@ -501,7 +461,7 @@ impl Board {
         }
     }
 
-    fn gen_en_passant_moves(&self, list: &mut Vec<Move>, stm: Side) {
+    fn generate_en_passant_moves(&self, list: &mut Vec<Move>, stm: Side) {
         if self.ep == 255 {
             return;
         }
@@ -510,15 +470,15 @@ impl Board {
         let pawns = self.bb_piece[stm as usize][PAWN];
 
         if stm == Side::White {
-            self.try_add_ep_move(list, ep_sq, pawns, -9, 9, 0);
-            self.try_add_ep_move(list, ep_sq, pawns, -7, 7, 7);
+            self.try_add_en_passant_move(list, ep_sq, pawns, -9, 9, 0);
+            self.try_add_en_passant_move(list, ep_sq, pawns, -7, 7, 7);
         } else {
-            self.try_add_ep_move(list, ep_sq, pawns, 7, 56, 0);
-            self.try_add_ep_move(list, ep_sq, pawns, 9, 54, 7);
+            self.try_add_en_passant_move(list, ep_sq, pawns, 7, 56, 0);
+            self.try_add_en_passant_move(list, ep_sq, pawns, 9, 54, 7);
         }
     }
 
-    fn try_add_ep_move(&self, list: &mut Vec<Move>, ep_sq: usize, pawns: u64, offset: i32, min_sq: usize, file_constraint: usize) {
+    fn try_add_en_passant_move(&self, list: &mut Vec<Move>, ep_sq: usize, pawns: u64, offset: i32, min_sq: usize, file_constraint: usize) {
         let condition = if offset < 0 {
             ep_sq >= min_sq && ep_sq % 8 != file_constraint
         } else {
@@ -538,362 +498,135 @@ impl Board {
         }
     }
 
-    fn gen_knight_moves(&self, list: &mut Vec<Move>, stm: Side, bb_own: u64, bb_opp: u64) {
+    fn generate_knight_moves(&self, list: &mut Vec<Move>, stm: Side, own_bb: u64, opponent_bb: u64) {
         let knights = self.bb_piece[stm as usize][KNIGHT];
-        for from in Bitscan::new(knights) {
-            let mut attacks = unsafe { NATT[from] };
-            attacks &= !bb_own;
-            for to in Bitscan::new(attacks) {
+        for from in BitboardIterator::new(knights) {
+            let attacks = unsafe { KNIGHT_ATTACKS[from] } & !own_bb;
+            for to in BitboardIterator::new(attacks) {
                 list.push(Move {
                     from: from as u8,
                     to: to as u8,
                     promo: 255,
-                    flags: if bb_opp & (1u64 << to) > 0 { FLAG_CAPTURE } else { 0 },
+                    flags: if opponent_bb & (1u64 << to) > 0 { FLAG_CAPTURE } else { 0 },
                 });
             }
         }
     }
 
-    fn gen_sliding_piece_moves(&self, list: &mut Vec<Move>, stm: Side, bb_own: u64, bb_opp: u64, bb_occ: u64) {
-        for p in 2..6 {
-            let mut bbp = self.bb_piece[stm as usize][p];
-            while bbp > 0 {
-                let from = pop_lsb(&mut bbp);
-                let mut attacks = match p {
-                    BISHOP => bishop_attacks(from, bb_occ),
-                    ROOK => rook_attacks(from, bb_occ),
-                    QUEEN => bishop_attacks(from, bb_occ) | rook_attacks(from, bb_occ),
-                    KING => unsafe { KATT[from] },
+    fn generate_sliding_piece_moves(&self, list: &mut Vec<Move>, stm: Side, own_bb: u64, opponent_bb: u64, occupancy: u64) {
+        for piece in 2..6 {
+            let mut piece_bb = self.bb_piece[stm as usize][piece];
+            while piece_bb > 0 {
+                let from = pop_lsb(&mut piece_bb);
+                let attacks = match piece {
+                    BISHOP => bishop_attacks(from, occupancy),
+                    ROOK => rook_attacks(from, occupancy),
+                    QUEEN => bishop_attacks(from, occupancy) | rook_attacks(from, occupancy),
+                    KING => unsafe { KING_ATTACKS[from] },
                     _ => 0,
-                };
-                attacks &= !bb_own;
-                while attacks > 0 {
-                    let to = pop_lsb(&mut attacks);
+                } & !own_bb;
+
+                for to in BitboardIterator::new(attacks) {
                     list.push(Move {
                         from: from as u8,
                         to: to as u8,
                         promo: 255,
-                        flags: if bb_opp & (1u64 << to) > 0 { FLAG_CAPTURE } else { 0 },
+                        flags: if opponent_bb & (1u64 << to) > 0 { FLAG_CAPTURE } else { 0 },
                     });
                 }
             }
         }
     }
 
-    fn gen_castling_moves(&self, list: &mut Vec<Move>, stm: Side, bb_occ: u64) {
+    fn generate_castling_moves(&self, list: &mut Vec<Move>, stm: Side, occupancy: u64) {
         let king_sq = self.bb_piece[stm as usize][KING].trailing_zeros() as usize;
 
         if stm == Side::White {
-            if self.castling & 1 != 0
-                && king_sq == 4
-                && (bb_occ & ((1u64 << 5) | (1u64 << 6))) == 0
-                && !self.is_attacked(4, Side::Black)
-                && !self.is_attacked(5, Side::Black)
-                && !self.is_attacked(6, Side::Black)
-            {
+            if self.can_castle_kingside_white(king_sq, occupancy) {
                 list.push(Move { from: 4, to: 6, promo: 255, flags: FLAG_CASTLE });
             }
-            if self.castling & 2 != 0
-                && king_sq == 4
-                && (bb_occ & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3))) == 0
-                && !self.is_attacked(4, Side::Black)
-                && !self.is_attacked(3, Side::Black)
-                && !self.is_attacked(2, Side::Black)
-            {
+            if self.can_castle_queenside_white(king_sq, occupancy) {
                 list.push(Move { from: 4, to: 2, promo: 255, flags: FLAG_CASTLE });
             }
         } else {
-            if self.castling & 4 != 0
-                && king_sq == 60
-                && (bb_occ & ((1u64 << 61) | (1u64 << 62))) == 0
-                && !self.is_attacked(60, Side::White)
-                && !self.is_attacked(61, Side::White)
-                && !self.is_attacked(62, Side::White)
-            {
+            if self.can_castle_kingside_black(king_sq, occupancy) {
                 list.push(Move { from: 60, to: 62, promo: 255, flags: FLAG_CASTLE });
             }
-            if self.castling & 8 != 0
-                && king_sq == 60
-                && (bb_occ & ((1u64 << 57) | (1u64 << 58) | (1u64 << 59))) == 0
-                && !self.is_attacked(60, Side::White)
-                && !self.is_attacked(59, Side::White)
-                && !self.is_attacked(58, Side::White)
-            {
+            if self.can_castle_queenside_black(king_sq, occupancy) {
                 list.push(Move { from: 60, to: 58, promo: 255, flags: FLAG_CASTLE });
             }
         }
     }
-}
 
-pub fn sq_from_str(s: &str) -> Option<usize> {
-    if s.len() != 2 { return None; }
-    let mut chars = s.chars();
-    let f = chars.next()? as usize - 'a' as usize;
-    let r = chars.next()? as usize - '1' as usize;
-    if f > 7 || r > 7 { return None; }
-    Some(r * 8 + f)
-}
-
-pub fn sq_to_str(sq: usize) -> String {
-    let f = (sq % 8) as u8 + b'a';
-    let r = (sq / 8) as u8 + b'1';
-    format!("{}{}", f as char, r as char)
-}
-
-pub fn move_to_str(m: Move) -> String {
-    let mut s = format!("{}{}", sq_to_str(m.from as usize), sq_to_str(m.to as usize));
-    if m.promo != 255 {
-        s.push(match m.promo {
-            1 => 'n',
-            2 => 'b',
-            3 => 'r',
-            4 => 'q',
-            _ => 'q',
-        })
+    fn can_castle_kingside_white(&self, king_sq: usize, occupancy: u64) -> bool {
+        self.castling & 1 != 0
+            && king_sq == 4
+            && (occupancy & ((1u64 << 5) | (1u64 << 6))) == 0
+            && !self.is_square_attacked(4, Side::Black)
+            && !self.is_square_attacked(5, Side::Black)
+            && !self.is_square_attacked(6, Side::Black)
     }
-    s
-}
 
-pub fn str_to_move(b: &Board, s: &str) -> Option<Move> {
-    if s.len() < 4 {
-        return None;
+    fn can_castle_queenside_white(&self, king_sq: usize, occupancy: u64) -> bool {
+        self.castling & 2 != 0
+            && king_sq == 4
+            && (occupancy & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3))) == 0
+            && !self.is_square_attacked(4, Side::Black)
+            && !self.is_square_attacked(3, Side::Black)
+            && !self.is_square_attacked(2, Side::Black)
     }
-    let from = sq_from_str(&s[0..2])?;
-    let to = sq_from_str(&s[2..4])?;
-    let promo = if s.len() == 5 {
-        match &s[4..5] {
-            "n" => 1,
-            "b" => 2,
-            "r" => 3,
-            "q" => 4,
-            _ => 4,
-        }
-    } else {
-        255
-    };
-    let mut list = Vec::new();
-    b.gen_moves(&mut list);
-    list.into_iter().find(|&m| m.from as usize == from
-            && m.to as usize == to
-            && (m.promo == promo || (m.promo == 255 && promo == 255)))
-}
 
-static mut ZOBRIST_PIECE: [[[u64; 64]; 6]; 2] = [[[0; 64]; 6]; 2];
-static mut ZOBRIST_CASTLE: [u64; 16] = [0; 16];
-static mut ZOBRIST_EP: [u64; 8] = [0; 8];
-static mut ZOBRIST_STM: u64 = 0;
-static mut CASTLE_MASK: [u8; 64] = [0; 64];
-
-pub fn init_zobrist() {
-    let mut rng = XorShift(0xdeadbeefcafebabe);
-    unsafe {
-        for c in 0..2 { for p in 0..6 { for s in 0..64 { ZOBRIST_PIECE[c][p][s] = rng.rand(); } } }
-        for i in 0..16 { ZOBRIST_CASTLE[i] = rng.rand(); }
-        for i in 0..8 { ZOBRIST_EP[i] = rng.rand(); }
-        ZOBRIST_STM = rng.rand();
-
-        for i in 0..64 { CASTLE_MASK[i] = 15; }
-        CASTLE_MASK[0] &= 13; CASTLE_MASK[4] &= 12; CASTLE_MASK[7] &= 14;
-        CASTLE_MASK[56] &= 7; CASTLE_MASK[60] &= 3; CASTLE_MASK[63] &= 11;
+    fn can_castle_kingside_black(&self, king_sq: usize, occupancy: u64) -> bool {
+        self.castling & 4 != 0
+            && king_sq == 60
+            && (occupancy & ((1u64 << 61) | (1u64 << 62))) == 0
+            && !self.is_square_attacked(60, Side::White)
+            && !self.is_square_attacked(61, Side::White)
+            && !self.is_square_attacked(62, Side::White)
     }
-}
 
-static mut NATT: [u64; 64] = [0; 64];
-static mut KATT: [u64; 64] = [0; 64];
-
-pub fn init_tables() {
-    const KNIGHT_DIRS: [(i32, i32); 8] = [
-        (-2, -1),
-        (-2, 1),
-        (-1, -2),
-        (-1, 2),
-        (1, -2),
-        (1, 2),
-        (2, -1),
-        (2, 1),
-    ];
-
-    for sq in 0..64 {
-        let rank = (sq / 8) as i32;
-        let file = (sq % 8) as i32;
-
-        unsafe {
-            NATT[sq] = 0;
-            for (dr, df) in KNIGHT_DIRS {
-                let nr = rank + dr;
-                let nf = file + df;
-                if (0..8).contains(&nr) && (0..8).contains(&nf) {
-                    let target = (nr * 8 + nf) as u32;
-                    NATT[sq] |= 1u64 << target;
-                }
-            }
-
-            KATT[sq] = 0;
-            for dr in -1..=1 {
-                for df in -1..=1 {
-                    if dr == 0 && df == 0 {
-                        continue;
-                    }
-                    let nr = rank + dr;
-                    let nf = file + df;
-                    if (0..8).contains(&nr) && (0..8).contains(&nf) {
-                        let target = (nr * 8 + nf) as u32;
-                        KATT[sq] |= 1u64 << target;
-                    }
-                }
-            }
-        }
+    fn can_castle_queenside_black(&self, king_sq: usize, occupancy: u64) -> bool {
+        self.castling & 8 != 0
+            && king_sq == 60
+            && (occupancy & ((1u64 << 57) | (1u64 << 58) | (1u64 << 59))) == 0
+            && !self.is_square_attacked(60, Side::White)
+            && !self.is_square_attacked(59, Side::White)
+            && !self.is_square_attacked(58, Side::White)
     }
-}
 
-fn bishop_attacks(sq: usize, occ: u64) -> u64 {
-    let mut attacks = 0;
-    let r = sq / 8;
-    let f = sq % 8;
-
-    for i in 1.. {
-        if r + i > 7 || f + i > 7 { break; }
-        let to = (r + i) * 8 + (f + i);
-        attacks |= 1u64 << to;
-        if occ & (1u64 << to) > 0 { break; }
-    }
-    for i in 1.. {
-        if r + i > 7 || f < i { break; }
-        let to = (r + i) * 8 + (f - i);
-        attacks |= 1u64 << to;
-        if occ & (1u64 << to) > 0 { break; }
-    }
-    for i in 1.. {
-        if r < i || f + i > 7 { break; }
-        let to = (r - i) * 8 + (f + i);
-        attacks |= 1u64 << to;
-        if occ & (1u64 << to) > 0 { break; }
-    }
-    for i in 1.. {
-        if r < i || f < i { break; }
-        let to = (r - i) * 8 + (f - i);
-        attacks |= 1u64 << to;
-        if occ & (1u64 << to) > 0 { break; }
-    }
-    attacks
-}
-
-fn rook_attacks(sq: usize, occ: u64) -> u64 {
-    let mut attacks = 0;
-    let r = sq / 8;
-    let f = sq % 8;
-
-    for i in 1.. {
-        if r + i > 7 { break; }
-        let to = (r + i) * 8 + f;
-        attacks |= 1u64 << to;
-        if occ & (1u64 << to) > 0 { break; }
-    }
-    for i in 1.. {
-        if r < i { break; }
-        let to = (r - i) * 8 + f;
-        attacks |= 1u64 << to;
-        if occ & (1u64 << to) > 0 { break; }
-    }
-    for i in 1.. {
-        if f + i > 7 { break; }
-        let to = r * 8 + (f + i);
-        attacks |= 1u64 << to;
-        if occ & (1u64 << to) > 0 { break; }
-    }
-    for i in 1.. {
-        if f < i { break; }
-        let to = r * 8 + (f - i);
-        attacks |= 1u64 << to;
-        if occ & (1u64 << to) > 0 { break; }
-    }
-    attacks
-}
-
-#[inline]
-pub fn pop_lsb(b: &mut u64) -> usize {
-    let s = b.trailing_zeros() as usize;
-    *b &= *b - 1;
-    s
-}
-
-struct XorShift(u64);
-impl XorShift { fn rand(&mut self) -> u64 { self.0 ^= self.0 << 13; self.0 ^= self.0 >> 7; self.0 ^= self.0 << 17; self.0 } }
-
-pub struct Bitscan {
-    bb: u64,
-}
-
-impl Bitscan {
-    pub fn new(bb: u64) -> Self {
-        Self { bb }
-    }
-}
-
-impl Iterator for Bitscan {
-    type Item = usize;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.bb == 0 {
-            None
-        } else {
-            Some(pop_lsb(&mut self.bb))
-        }
-    }
-}
-
-// Helper methods for ML encoder
-impl Board {
-    /// Get side to move as usize (0=White, 1=Black)
     pub fn side(&self) -> usize {
         self.stm as usize
     }
 
-    /// Get piece bitboard for a specific side and piece type
     pub fn piece_bitboard(&self, side: usize, piece: usize) -> u64 {
         self.bb_piece[side][piece]
     }
 
-    /// Check if side can castle kingside
     pub fn can_castle_kingside(&self, side: usize) -> bool {
-        if side == 0 {
-            self.castling & 1 != 0  // White kingside
-        } else {
-            self.castling & 4 != 0  // Black kingside
-        }
+        if side == 0 { self.castling & 1 != 0 } else { self.castling & 4 != 0 }
     }
 
-    /// Check if side can castle queenside
     pub fn can_castle_queenside(&self, side: usize) -> bool {
-        if side == 0 {
-            self.castling & 2 != 0  // White queenside
-        } else {
-            self.castling & 8 != 0  // Black queenside
-        }
+        if side == 0 { self.castling & 2 != 0 } else { self.castling & 8 != 0 }
     }
 
-    /// Check if en passant is available
     pub fn has_en_passant(&self) -> bool {
         self.ep != 255
     }
 
-    /// Get halfmove clock
     pub fn halfmove_clock(&self) -> u8 {
         self.half_move
     }
 
-    /// Create a new board (alias for startpos)
     #[allow(dead_code)]
     pub fn new() -> Self {
         Self::startpos()
     }
 
-    /// Check if the position is drawn by insufficient material
     pub fn is_insufficient_material(&self) -> bool {
-        // Count total material for both sides
         let white = Side::White as usize;
         let black = Side::Black as usize;
 
-        // If there are any pawns, rooks, or queens, not insufficient material
         if self.bb_piece[white][PAWN] != 0 || self.bb_piece[black][PAWN] != 0 {
             return false;
         }
@@ -904,7 +637,6 @@ impl Board {
             return false;
         }
 
-        // Count minor pieces
         let white_knights = self.bb_piece[white][KNIGHT].count_ones();
         let white_bishops = self.bb_piece[white][BISHOP].count_ones();
         let black_knights = self.bb_piece[black][KNIGHT].count_ones();
@@ -913,23 +645,17 @@ impl Board {
         let white_minors = white_knights + white_bishops;
         let black_minors = black_knights + black_bishops;
 
-        // King vs King
         if white_minors == 0 && black_minors == 0 {
             return true;
         }
 
-        // King + minor vs King
         if (white_minors == 1 && black_minors == 0) || (white_minors == 0 && black_minors == 1) {
             return true;
         }
 
-        // King + Bishop vs King + Bishop (same color bishops)
         if white_knights == 0 && black_knights == 0 && white_bishops == 1 && black_bishops == 1 {
-            // Check if bishops are on the same color square
             let white_bishop_sq = self.bb_piece[white][BISHOP].trailing_zeros() as usize;
             let black_bishop_sq = self.bb_piece[black][BISHOP].trailing_zeros() as usize;
-
-            // Square color is (rank + file) % 2
             let white_color = (white_bishop_sq / 8 + white_bishop_sq % 8) % 2;
             let black_color = (black_bishop_sq / 8 + black_bishop_sq % 8) % 2;
 
@@ -941,24 +667,14 @@ impl Board {
         false
     }
 
-    /// Check if the position is drawn by the fifty-move rule
     pub fn is_fifty_move_draw(&self) -> bool {
         self.half_move >= 100
     }
 
-    /// Check if the position is drawn by three-fold repetition
     pub fn is_repetition_draw(&self) -> bool {
-        let mut count = 1; // Current position counts as one
-
-        // Look back through history for positions with the same hash
-        // We only need to check positions since the last pawn move or capture
-        // (half_move counter tells us how far back that is)
+        let mut count = 1;
         let lookback = (self.half_move as usize).min(self.hist.len());
 
-        // History stores positions BEFORE each move was made.
-        // To check same-side-to-move positions, we need to step by 2
-        // and start at the right parity: hist[len-2], hist[len-4], etc.
-        // These are positions where it was the same side's turn.
         for i in (2..=lookback).step_by(2) {
             if self.hist.len() >= i {
                 let idx = self.hist.len() - i;
@@ -974,10 +690,276 @@ impl Board {
         false
     }
 
-    /// Check if the current position is drawn by any rule
     pub fn is_draw(&self) -> bool {
-        self.is_insufficient_material()
-            || self.is_fifty_move_draw()
-            || self.is_repetition_draw()
+        self.is_insufficient_material() || self.is_fifty_move_draw() || self.is_repetition_draw()
+    }
+}
+
+pub fn parse_square(s: &str) -> Option<usize> {
+    if s.len() != 2 {
+        return None;
+    }
+    let mut chars = s.chars();
+    let f = chars.next()? as usize - 'a' as usize;
+    let r = chars.next()? as usize - '1' as usize;
+    if f > 7 || r > 7 {
+        return None;
+    }
+    Some(r * 8 + f)
+}
+
+pub fn square_to_string(sq: usize) -> String {
+    let f = (sq % 8) as u8 + b'a';
+    let r = (sq / 8) as u8 + b'1';
+    format!("{}{}", f as char, r as char)
+}
+
+pub fn move_to_str(m: Move) -> String {
+    let mut s = format!("{}{}", square_to_string(m.from as usize), square_to_string(m.to as usize));
+    if m.promo != 255 {
+        s.push(match m.promo {
+            1 => 'n',
+            2 => 'b',
+            3 => 'r',
+            4 => 'q',
+            _ => 'q',
+        })
+    }
+    s
+}
+
+pub fn str_to_move(board: &Board, s: &str) -> Option<Move> {
+    if s.len() < 4 {
+        return None;
+    }
+    let from = parse_square(&s[0..2])?;
+    let to = parse_square(&s[2..4])?;
+    let promo = if s.len() == 5 {
+        match &s[4..5] {
+            "n" => 1,
+            "b" => 2,
+            "r" => 3,
+            "q" => 4,
+            _ => 4,
+        }
+    } else {
+        255
+    };
+
+    let mut list = Vec::new();
+    board.gen_moves(&mut list);
+    list.into_iter().find(|&m| m.from as usize == from && m.to as usize == to && (m.promo == promo || (m.promo == 255 && promo == 255)))
+}
+
+static mut ZOBRIST_PIECE: [[[u64; 64]; 6]; 2] = [[[0; 64]; 6]; 2];
+static mut ZOBRIST_CASTLE: [u64; 16] = [0; 16];
+static mut ZOBRIST_EP: [u64; 8] = [0; 8];
+static mut ZOBRIST_STM: u64 = 0;
+static mut CASTLE_MASK: [u8; 64] = [0; 64];
+
+pub fn init_zobrist() {
+    let mut rng = XorShiftRng(0xdeadbeefcafebabe);
+    unsafe {
+        for c in 0..2 {
+            for p in 0..6 {
+                for s in 0..64 {
+                    ZOBRIST_PIECE[c][p][s] = rng.next();
+                }
+            }
+        }
+        for i in 0..16 {
+            ZOBRIST_CASTLE[i] = rng.next();
+        }
+        for i in 0..8 {
+            ZOBRIST_EP[i] = rng.next();
+        }
+        ZOBRIST_STM = rng.next();
+
+        for i in 0..64 {
+            CASTLE_MASK[i] = 15;
+        }
+        CASTLE_MASK[0] &= 13;
+        CASTLE_MASK[4] &= 12;
+        CASTLE_MASK[7] &= 14;
+        CASTLE_MASK[56] &= 7;
+        CASTLE_MASK[60] &= 3;
+        CASTLE_MASK[63] &= 11;
+    }
+}
+
+static mut KNIGHT_ATTACKS: [u64; 64] = [0; 64];
+static mut KING_ATTACKS: [u64; 64] = [0; 64];
+
+pub fn init_tables() {
+    const KNIGHT_OFFSETS: [(i32, i32); 8] = [(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)];
+
+    for sq in 0..64 {
+        let rank = (sq / 8) as i32;
+        let file = (sq % 8) as i32;
+
+        unsafe {
+            KNIGHT_ATTACKS[sq] = 0;
+            for (dr, df) in KNIGHT_OFFSETS {
+                let nr = rank + dr;
+                let nf = file + df;
+                if (0..8).contains(&nr) && (0..8).contains(&nf) {
+                    let target = (nr * 8 + nf) as u32;
+                    KNIGHT_ATTACKS[sq] |= 1u64 << target;
+                }
+            }
+
+            KING_ATTACKS[sq] = 0;
+            for dr in -1..=1 {
+                for df in -1..=1 {
+                    if dr == 0 && df == 0 {
+                        continue;
+                    }
+                    let nr = rank + dr;
+                    let nf = file + df;
+                    if (0..8).contains(&nr) && (0..8).contains(&nf) {
+                        let target = (nr * 8 + nf) as u32;
+                        KING_ATTACKS[sq] |= 1u64 << target;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn bishop_attacks(sq: usize, occupancy: u64) -> u64 {
+    let mut attacks = 0;
+    let rank = sq / 8;
+    let file = sq % 8;
+
+    for i in 1.. {
+        if rank + i > 7 || file + i > 7 {
+            break;
+        }
+        let to = (rank + i) * 8 + (file + i);
+        attacks |= 1u64 << to;
+        if occupancy & (1u64 << to) > 0 {
+            break;
+        }
+    }
+    for i in 1.. {
+        if rank + i > 7 || file < i {
+            break;
+        }
+        let to = (rank + i) * 8 + (file - i);
+        attacks |= 1u64 << to;
+        if occupancy & (1u64 << to) > 0 {
+            break;
+        }
+    }
+    for i in 1.. {
+        if rank < i || file + i > 7 {
+            break;
+        }
+        let to = (rank - i) * 8 + (file + i);
+        attacks |= 1u64 << to;
+        if occupancy & (1u64 << to) > 0 {
+            break;
+        }
+    }
+    for i in 1.. {
+        if rank < i || file < i {
+            break;
+        }
+        let to = (rank - i) * 8 + (file - i);
+        attacks |= 1u64 << to;
+        if occupancy & (1u64 << to) > 0 {
+            break;
+        }
+    }
+
+    attacks
+}
+
+fn rook_attacks(sq: usize, occupancy: u64) -> u64 {
+    let mut attacks = 0;
+    let rank = sq / 8;
+    let file = sq % 8;
+
+    for i in 1.. {
+        if rank + i > 7 {
+            break;
+        }
+        let to = (rank + i) * 8 + file;
+        attacks |= 1u64 << to;
+        if occupancy & (1u64 << to) > 0 {
+            break;
+        }
+    }
+    for i in 1.. {
+        if rank < i {
+            break;
+        }
+        let to = (rank - i) * 8 + file;
+        attacks |= 1u64 << to;
+        if occupancy & (1u64 << to) > 0 {
+            break;
+        }
+    }
+    for i in 1.. {
+        if file + i > 7 {
+            break;
+        }
+        let to = rank * 8 + (file + i);
+        attacks |= 1u64 << to;
+        if occupancy & (1u64 << to) > 0 {
+            break;
+        }
+    }
+    for i in 1.. {
+        if file < i {
+            break;
+        }
+        let to = rank * 8 + (file - i);
+        attacks |= 1u64 << to;
+        if occupancy & (1u64 << to) > 0 {
+            break;
+        }
+    }
+
+    attacks
+}
+
+#[inline]
+pub fn pop_lsb(b: &mut u64) -> usize {
+    let s = b.trailing_zeros() as usize;
+    *b &= *b - 1;
+    s
+}
+
+struct XorShiftRng(u64);
+
+impl XorShiftRng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+}
+
+pub struct BitboardIterator {
+    bb: u64,
+}
+
+impl BitboardIterator {
+    pub fn new(bb: u64) -> Self {
+        Self { bb }
+    }
+}
+
+impl Iterator for BitboardIterator {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.bb == 0 {
+            None
+        } else {
+            Some(pop_lsb(&mut self.bb))
+        }
     }
 }
