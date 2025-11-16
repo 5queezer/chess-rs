@@ -158,6 +158,7 @@ impl MLEvaluator {
         self.config.blend_factor = factor.clamp(0.0, 1.0);
     }
 
+    #[allow(dead_code)]
     pub fn print_status(&self) {
         eprintln!("ML Status: {}", if self.is_ready { "Ready" } else { "Not Ready" });
         eprintln!("Device: {}", self.device_info());
