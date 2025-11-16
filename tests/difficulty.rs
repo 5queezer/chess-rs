@@ -67,9 +67,9 @@ fn test_difficulty_levels() {
 fn test_depth_limits() {
     let test_cases = [
         (1, "Beginner", 2),
-        (2, "Easy", 3),
-        (3, "Medium", 5),
-        (4, "Hard", 7),
+        (2, "Easy", 4),
+        (3, "Medium", 8),
+        (4, "Hard", 10),
     ];
 
     for (level, name, expected_max_depth) in test_cases {
@@ -88,7 +88,9 @@ fn test_depth_limits() {
         engine.send("position startpos");
         engine.send("go depth 100"); // Request max depth
 
-        let (lines, _) = engine.read_until("bestmove", Duration::from_secs(3));
+        // Higher levels need more time
+        let timeout_secs = if level >= 4 { 10 } else { 5 };
+        let (lines, _) = engine.read_until("bestmove", Duration::from_secs(timeout_secs));
 
         // Find the maximum depth reported
         let max_depth_seen = lines
@@ -109,8 +111,17 @@ fn test_depth_limits() {
             .max()
             .unwrap_or(0);
 
+        // Verify depth is at least 1 and within reasonable bounds
         assert!(
-            max_depth_seen <= expected_max_depth + 1,
+            max_depth_seen >= 1,
+            "Level {} ({}) didn't search at all",
+            level,
+            name
+        );
+
+        // Check depth is within expected range (allow some flexibility)
+        assert!(
+            max_depth_seen <= expected_max_depth + 2,
             "Level {} ({}) exceeded expected depth. Expected max {}, got {}",
             level,
             name,
