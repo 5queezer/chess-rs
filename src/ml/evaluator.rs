@@ -150,9 +150,18 @@ impl MLEvaluator {
         self.device_manager.info()
     }
 
+    pub fn blend_factor(&self) -> f32 {
+        self.config.blend_factor
+    }
+
+    pub fn set_blend_factor(&mut self, factor: f32) {
+        self.config.blend_factor = factor.clamp(0.0, 1.0);
+    }
+
     pub fn print_status(&self) {
         eprintln!("ML Status: {}", if self.is_ready { "Ready" } else { "Not Ready" });
         eprintln!("Device: {}", self.device_info());
+        eprintln!("Blend Factor: {}", self.config.blend_factor);
     }
 }
 

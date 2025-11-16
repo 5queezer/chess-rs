@@ -156,14 +156,20 @@ struct SearchContext {
 
 impl SearchContext {
     fn evaluate_position(&self, board: &Board) -> i32 {
+        let classical_score = evaluate_classical(board);
+
         if *self.engine.use_ml.lock().unwrap() {
             if let Some(ref ml_eval) = *self.engine.ml_evaluator.lock().unwrap() {
-                if let Ok(score) = ml_eval.evaluate(board) {
-                    return score;
+                if let Ok(ml_score) = ml_eval.evaluate(board) {
+                    let blend_factor = ml_eval.blend_factor();
+                    // Blend ML and classical evaluation
+                    // blend_factor = 1.0 means 100% ML, 0.0 means 100% classical
+                    let blended = (ml_score as f32 * blend_factor + classical_score as f32 * (1.0 - blend_factor)) as i32;
+                    return blended;
                 }
             }
         }
-        evaluate_classical(board)
+        classical_score
     }
 
     fn find_best_move(&mut self, board: &mut Board, max_depth: i32) -> (i32, Option<Move>) {
@@ -725,11 +731,21 @@ fn process_command(line: &str, board: &mut Board, engine: &mut Engine, xboard_mo
 }
 
 fn handle_uci_command(engine: &Engine) {
-    println!("id name rce-ml");
+    // Determine GPU availability from ML evaluator
+    let (has_gpu, device_info) = if let Some(ref ml_eval) = *engine.ml_evaluator.lock().unwrap() {
+        (ml_eval.is_gpu(), ml_eval.device_info())
+    } else {
+        (false, "No ML evaluator".to_string())
+    };
+
+    let gpu_suffix = if has_gpu { " (GPU)" } else { " (CPU)" };
+    println!("id name rce-ml{}", gpu_suffix);
     println!("id author openai + neural network");
+    println!("info string Device: {}", device_info);
     println!("option name Skill Level type spin default 5 min 1 max 5");
     println!("option name Use ML Evaluation type check default false");
     println!("option name ML Model Path type string default <empty>");
+    println!("option name ML Blend Factor type spin default 100 min 0 max 100");
     println!("uciok");
     let _ = io::stdout().flush();
 }
@@ -851,6 +867,13 @@ fn handle_setoption_command(cmd: &str, engine: &mut Engine) {
             let value_str = parts[v_idx].to_lowercase();
             let enabled = value_str == "true" || value_str == "1";
             *engine.use_ml.lock().unwrap() = enabled;
+        } else if name.contains("blend") || name.contains("factor") {
+            if let Ok(factor_percent) = parts[v_idx].parse::<u8>() {
+                let factor = (factor_percent as f32 / 100.0).clamp(0.0, 1.0);
+                if let Some(ref mut ml_eval) = *engine.ml_evaluator.lock().unwrap() {
+                    ml_eval.set_blend_factor(factor);
+                }
+            }
         }
     }
 }
@@ -863,6 +886,38 @@ fn calculate_search_depth(difficulty: u8, requested_depth: Option<i32>, use_ml: 
             5000..=14999 => 7,
             15000..=29999 => 10,
             _ => 12,
+        }
+    } else {
+        match time_ms {
+            0..=999 => 6,
+            1000..=4999 => 10,
+            5000..=14999 => 15,
+            _ => 100,
+        }
+    };
+
+    let difficulty_max = match difficulty {
+        1 => 2,
+        2 => 4,
+        3 => 8,
+        4 => 12,
+        _ => 100,
+    };
+
+    let base_depth = requested_depth.unwrap_or(adaptive_max);
+    base_depth.min(difficulty_max).min(adaptive_max)
+}
+
+fn calculate_search_depth_with_gpu(difficulty: u8, requested_depth: Option<i32>, use_ml: bool, is_gpu: bool, time_ms: u64) -> i32 {
+    let adaptive_max = if use_ml {
+        // GPU acceleration allows deeper ML evaluation
+        let gpu_bonus = if is_gpu { 2 } else { 0 };
+        match time_ms {
+            0..=999 => 3 + gpu_bonus,
+            1000..=4999 => 5 + gpu_bonus,
+            5000..=14999 => 7 + gpu_bonus,
+            15000..=29999 => 10 + gpu_bonus,
+            _ => 12 + gpu_bonus,
         }
     } else {
         match time_ms {
@@ -920,8 +975,9 @@ fn handle_uci_go_command(line: &str, board: &mut Board, engine: &mut Engine) {
     let params = parse_go_params(line);
     let difficulty = *engine.difficulty.lock().unwrap();
     let use_ml = *engine.use_ml.lock().unwrap();
+    let is_gpu = engine.ml_evaluator.lock().unwrap().as_ref().map(|e| e.is_gpu()).unwrap_or(false);
     let time_ms = calculate_time_for_move(board.stm, &params, use_ml);
-    let depth = calculate_search_depth(difficulty, params.depth, use_ml, time_ms);
+    let depth = calculate_search_depth_with_gpu(difficulty, params.depth, use_ml, is_gpu, time_ms);
 
     let board_clone = board.clone();
     let tt = engine.transposition_table.clone();
@@ -983,13 +1039,14 @@ fn handle_raw_move_command(line: &str, board: &mut Board, engine: &mut Engine) {
 fn start_xboard_search(board: &Board, engine: &mut Engine) {
     let difficulty = *engine.difficulty.lock().unwrap();
     let use_ml = *engine.use_ml.lock().unwrap();
+    let is_gpu = engine.ml_evaluator.lock().unwrap().as_ref().map(|e| e.is_gpu()).unwrap_or(false);
     let time_cs = calculate_xboard_time_allocation(engine);
     let time_ms = (time_cs * 10) as u64;
 
     let depth = if let Some(d) = engine.depth_limit {
-        calculate_search_depth(difficulty, Some(d), use_ml, time_ms)
+        calculate_search_depth_with_gpu(difficulty, Some(d), use_ml, is_gpu, time_ms)
     } else {
-        calculate_search_depth(difficulty, None, use_ml, time_ms)
+        calculate_search_depth_with_gpu(difficulty, None, use_ml, is_gpu, time_ms)
     };
 
     let board_clone = board.clone();
