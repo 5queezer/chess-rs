@@ -120,9 +120,8 @@ struct Engine {
 impl Engine {
     fn new() -> Self {
         let ml_eval = MLEvaluator::new().ok();
-        if let Some(ref evaluator) = ml_eval {
-            evaluator.print_status();
-        }
+        // Note: Status is now printed via UCI info strings during 'uci' command
+        // to avoid confusing GUIs that expect only protocol messages
 
         Self {
             transposition_table: Arc::new(Mutex::new(HashMap::new())),
@@ -718,7 +717,13 @@ fn process_command(line: &str, board: &mut Board, engine: &mut Engine, xboard_mo
         "new" => handle_new_game_command(board, engine),
         "force" => handle_force_command(engine),
         "random" => {}
-        "quit" => std::process::exit(0),
+        "quit" => {
+            engine.stop_flag.store(true, Ordering::Relaxed);
+            if let Some(handle) = engine.search_thread.take() {
+                let _ = handle.join();
+            }
+            std::process::exit(0);
+        }
         "?" => engine.stop_flag.store(true, Ordering::Relaxed),
         "playother" => handle_playother_command(board, engine),
         "post" => engine.post_mode = true,
